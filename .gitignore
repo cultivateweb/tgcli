@@ -1,0 +1,14 @@
+# Артефакты сборки
+/bin/
+*.exe
+*.test
+*.out
+
+# Локальная конфигурация / сессии (секреты!)
+config.json
+session.json
+*.session
+
+# Окружение
+.env
+.DS_Store
