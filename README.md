@@ -52,6 +52,8 @@ go run ./cmd/tgcli help          # без сборки
 | `auth`    | войти в аккаунт (телефон → код → 2FA), по QR (`--qr`) или выйти (`--logout`) |
 | `status`  | показать, авторизован ли клиент и под кем             |
 | `send`    | отправить текст (`--to`, текст или stdin)             |
+| `chats`   | список диалогов (`--limit`, `--unread`, `--json`)     |
+| `read`    | последние сообщения чата (`--chat`, `--limit`, `--json`) |
 | `version` | показать версию                                       |
 
 Глобальные флаги: `-v` (подробный вывод), `-config <путь>`.
@@ -62,6 +64,8 @@ go run ./cmd/tgcli help          # без сборки
 ./bin/tgcli status                        # кто залогинен
 ./bin/tgcli send --to me "напоминание"    # себе, в Избранное
 echo "сборка готова" | ./bin/tgcli send --to @username
+./bin/tgcli chats --unread                # диалоги с непрочитанными
+./bin/tgcli read --chat @username --limit 20   # последние 20 сообщений
 ```
 
 ## Дальнейшие шаги

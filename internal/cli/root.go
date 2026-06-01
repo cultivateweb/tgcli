@@ -21,6 +21,8 @@ const appName = "tgcli"
 func commands() []*Command {
 	return []*Command{
 		authCmd(),
+		chatsCmd(),
+		readCmd(),
 		sendCmd(),
 		statusCmd(),
 		versionCmd(),

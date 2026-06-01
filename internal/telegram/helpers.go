@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/message/peer"
+	"github.com/gotd/td/telegram/query/dialogs"
+	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
 )
 
@@ -76,6 +79,91 @@ func DisplayName(u *tg.User) string {
 	default:
 		return "id " + strconv.FormatInt(u.ID, 10)
 	}
+}
+
+// dialogFromElem превращает элемент диалога в строку Dialog.
+func dialogFromElem(e dialogs.Elem) Dialog {
+	var d Dialog
+	if dlg, ok := e.Dialog.(*tg.Dialog); ok {
+		d.Unread = dlg.UnreadCount
+	}
+	d.Title, d.Kind = peerTitleKind(e.Peer, e.Entities)
+	if msg, ok := e.Last.(*tg.Message); ok {
+		d.Date = time.Unix(int64(msg.Date), 0)
+		d.Preview = oneLine(msg.Message)
+	}
+	return d
+}
+
+// historyFromElem превращает элемент истории в HistoryMessage.
+func historyFromElem(e messages.Elem) HistoryMessage {
+	var hm HistoryMessage
+	msg, ok := e.Msg.(*tg.Message)
+	if !ok {
+		return hm
+	}
+	hm.ID = int64(msg.ID)
+	hm.Date = time.Unix(int64(msg.Date), 0)
+	hm.Out = msg.Out
+	hm.Text = msg.Message
+	hm.Author = messageAuthor(msg, e.Entities, e.Peer)
+	return hm
+}
+
+// peerTitleKind возвращает отображаемое имя и тип собеседника/чата.
+func peerTitleKind(p tg.InputPeerClass, ent peer.Entities) (title, kind string) {
+	switch v := p.(type) {
+	case *tg.InputPeerSelf:
+		return "Избранное", "user"
+	case *tg.InputPeerUser:
+		if u, ok := ent.User(v.UserID); ok {
+			if u.Bot {
+				return DisplayName(u), "bot"
+			}
+			return DisplayName(u), "user"
+		}
+		return "id " + strconv.FormatInt(v.UserID, 10), "user"
+	case *tg.InputPeerChat:
+		if ch, ok := ent.Chat(v.ChatID); ok {
+			return ch.Title, "group"
+		}
+		return "id " + strconv.FormatInt(v.ChatID, 10), "group"
+	case *tg.InputPeerChannel:
+		if ch, ok := ent.Channel(v.ChannelID); ok {
+			if ch.Megagroup {
+				return ch.Title, "group"
+			}
+			return ch.Title, "channel"
+		}
+		return "id " + strconv.FormatInt(v.ChannelID, 10), "channel"
+	}
+	return "—", "?"
+}
+
+// messageAuthor определяет автора сообщения для отображения.
+func messageAuthor(m *tg.Message, ent peer.Entities, p tg.InputPeerClass) string {
+	if m.Out {
+		return "Вы"
+	}
+	if from, ok := m.GetFromID(); ok {
+		if pu, ok := from.(*tg.PeerUser); ok {
+			if u, ok := ent.User(pu.UserID); ok {
+				return DisplayName(u)
+			}
+			return "id " + strconv.FormatInt(pu.UserID, 10)
+		}
+	}
+	title, _ := peerTitleKind(p, ent)
+	return title
+}
+
+// oneLine схлопывает текст в одну строку и обрезает для превью.
+func oneLine(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if r := []rune(s); len(r) > 60 {
+		return string(r[:57]) + "…"
+	}
+	return s
 }
 
 // removeSession удаляет файл сессии; отсутствие файла ошибкой не считается.

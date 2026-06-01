@@ -20,6 +20,8 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/query"
+	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/mdp/qrterminal/v3"
@@ -321,16 +323,24 @@ func (c *Client) Status(ctx context.Context) (authorized bool, self *tg.User, er
 	return authorized, self, err
 }
 
+// requireAuth возвращает ErrNotAuthorized, если сессия не авторизована.
+func requireAuth(ctx context.Context, client *telegram.Client) error {
+	st, err := client.Auth().Status(ctx)
+	if err != nil {
+		return err
+	}
+	if !st.Authorized {
+		return ErrNotAuthorized
+	}
+	return nil
+}
+
 // SendMessage отправляет текстовое сообщение и возвращает данные результата.
 func (c *Client) SendMessage(ctx context.Context, m Message) (SentMessage, error) {
 	var sent SentMessage
 	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
-		st, err := client.Auth().Status(ctx)
-		if err != nil {
+		if err := requireAuth(ctx, client); err != nil {
 			return err
-		}
-		if !st.Authorized {
-			return ErrNotAuthorized
 		}
 
 		sender := message.NewSender(client.API())
@@ -344,4 +354,64 @@ func (c *Client) SendMessage(ctx context.Context, m Message) (SentMessage, error
 		return nil
 	})
 	return sent, err
+}
+
+// Dialogs возвращает список диалогов (свежие сверху). limit ограничивает число
+// строк; onlyUnread оставляет только чаты с непрочитанными сообщениями.
+func (c *Client) Dialogs(ctx context.Context, limit int, onlyUnread bool) ([]Dialog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var out []Dialog
+	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
+		if err := requireAuth(ctx, client); err != nil {
+			return err
+		}
+		iter := query.GetDialogs(client.API()).BatchSize(100).Iter()
+		scanned := 0
+		for len(out) < limit && iter.Next(ctx) {
+			// Защита от слишком долгого перебора, когда непрочитанных мало.
+			if scanned++; scanned > 1000 {
+				break
+			}
+			d := dialogFromElem(iter.Value())
+			if onlyUnread && d.Unread == 0 {
+				continue
+			}
+			out = append(out, d)
+		}
+		return iter.Err()
+	})
+	return out, err
+}
+
+// History возвращает последние limit сообщений чата to (старые сверху).
+func (c *Client) History(ctx context.Context, to string, limit int) ([]HistoryMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var out []HistoryMessage
+	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
+		if err := requireAuth(ctx, client); err != nil {
+			return err
+		}
+		api := client.API()
+		target, err := resolveTarget(message.NewSender(api), to).AsInputPeer(ctx)
+		if err != nil {
+			return fmt.Errorf("получатель %q: %w", to, err)
+		}
+		iter := messages.NewQueryBuilder(api).GetHistory(target).BatchSize(limit).Iter()
+		for len(out) < limit && iter.Next(ctx) {
+			out = append(out, historyFromElem(iter.Value()))
+		}
+		if err := iter.Err(); err != nil {
+			return err
+		}
+		// История приходит от новых к старым — разворачиваем (старые сверху).
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+		return nil
+	})
+	return out, err
 }
