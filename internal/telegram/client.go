@@ -18,9 +18,11 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
+	"github.com/mdp/qrterminal/v3"
 
 	"github.com/cultivateweb/tgcli/internal/config"
 )
@@ -38,22 +40,31 @@ func New(cfg *config.Config) *Client {
 	return &Client{cfg: cfg}
 }
 
+// baseOptions готовит api-данные и базовые опции gotd-клиента (хранилище
+// сессии). Каталог сессии создаётся заранее: gotd FileStorage пишет сессию
+// голым os.WriteFile и каталог не создаёт — без него сохранение падает и
+// роняет соединение («engine was closed»), а сессия не персистится.
+func (c *Client) baseOptions() (apiID int, apiHash string, opts telegram.Options, err error) {
+	apiID, apiHash, err = c.cfg.Credentials()
+	if err != nil {
+		return
+	}
+	sessionPath := c.cfg.SessionPath()
+	if mkErr := os.MkdirAll(filepath.Dir(sessionPath), 0o700); mkErr != nil {
+		err = fmt.Errorf("создание каталога сессии: %w", mkErr)
+		return
+	}
+	opts = telegram.Options{SessionStorage: &session.FileStorage{Path: sessionPath}}
+	return
+}
+
 // newGotd собирает неподключённый gotd-клиент с файловым хранилищем сессии.
 func (c *Client) newGotd() (*telegram.Client, error) {
-	apiID, apiHash, err := c.cfg.Credentials()
+	apiID, apiHash, opts, err := c.baseOptions()
 	if err != nil {
 		return nil, err
 	}
-	// gotd FileStorage пишет сессию голым os.WriteFile и каталог не создаёт.
-	// Если каталога нет, сохранение сессии падает и роняет соединение gotd
-	// («engine was closed»), а сессия не персистится между запусками.
-	sessionPath := c.cfg.SessionPath()
-	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
-		return nil, fmt.Errorf("создание каталога сессии: %w", err)
-	}
-	return telegram.NewClient(apiID, apiHash, telegram.Options{
-		SessionStorage: &session.FileStorage{Path: sessionPath},
-	}), nil
+	return telegram.NewClient(apiID, apiHash, opts), nil
 }
 
 // run поднимает соединение и выполняет fn внутри активной сессии.
@@ -90,6 +101,69 @@ func (c *Client) Login(ctx context.Context) (*tg.User, error) {
 		return nil
 	})
 	return self, err
+}
+
+// LoginQR выполняет вход по QR-коду: пользователь сканирует код в уже
+// авторизованном приложении (Настройки → Устройства → Подключить устройство).
+// Не использует SMS/код из приложения, поэтому обходит ограничение
+// SEND_CODE_UNAVAILABLE. Требует обработчик обновлений, чтобы поймать сигнал
+// о подтверждении (tg.UpdateLoginToken).
+func (c *Client) LoginQR(ctx context.Context) (*tg.User, error) {
+	apiID, apiHash, opts, err := c.baseOptions()
+	if err != nil {
+		return nil, err
+	}
+	dispatcher := tg.NewUpdateDispatcher()
+	opts.UpdateHandler = dispatcher
+	client := telegram.NewClient(apiID, apiHash, opts)
+
+	var self *tg.User
+	err = client.Run(ctx, func(ctx context.Context) error {
+		// Уже авторизованы — повторный вход не нужен.
+		if st, err := client.Auth().Status(ctx); err == nil && st.Authorized {
+			if st.User != nil {
+				self = st.User
+				return nil
+			}
+			self, err = client.Self(ctx)
+			return err
+		}
+
+		loggedIn := qrlogin.OnLoginToken(dispatcher)
+		authz, err := client.QR().Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+			showQR(token)
+			return nil
+		})
+		// При включённой 2FA после сканирования нужен облачный пароль.
+		if errors.Is(err, auth.ErrPasswordAuthNeeded) {
+			fmt.Println("\nУ аккаунта включена двухфакторная аутентификация.")
+			pw, perr := newPrompter("").Password()
+			if perr != nil {
+				return perr
+			}
+			pwAuthz, perr := client.Auth().Password(ctx, pw)
+			if perr != nil {
+				return authError("двухфакторная аутентификация", perr)
+			}
+			self, perr = userFromAuth(pwAuthz)
+			return perr
+		}
+		if err != nil {
+			return friendlyAuthError(err)
+		}
+		self, err = userFromAuth(authz)
+		return err
+	})
+	return self, err
+}
+
+// showQR печатает QR-код входа и ссылку-резерв.
+func showQR(token qrlogin.Token) {
+	fmt.Println("\nОтсканируйте QR-код в Telegram на телефоне:")
+	fmt.Println("Настройки → Устройства → Подключить устройство.")
+	qrterminal.GenerateHalfBlock(token.URL(), qrterminal.L, os.Stdout)
+	fmt.Printf("\nНе сканируется? Откройте ссылку на залогиненном устройстве:\n%s\n", token.URL())
+	fmt.Println("Ожидаю подтверждения…")
 }
 
 // signIn проводит интерактивный вход вручную (вместо высокоуровневого

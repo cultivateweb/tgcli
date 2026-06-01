@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/gotd/td v0.144.0
+	github.com/mdp/qrterminal/v3 v3.2.1
 	golang.org/x/term v0.43.0
 )
 
