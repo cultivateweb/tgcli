@@ -135,7 +135,9 @@ func (c *Client) LoginQR(ctx context.Context) (*tg.User, error) {
 			return nil
 		})
 		// При включённой 2FA после сканирования нужен облачный пароль.
-		if errors.Is(err, auth.ErrPasswordAuthNeeded) {
+		// qrlogin.Import отдаёт сырую SESSION_PASSWORD_NEEDED (в отличие от
+		// обычного SignIn, который конвертирует её в ErrPasswordAuthNeeded).
+		if errors.Is(err, auth.ErrPasswordAuthNeeded) || tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
 			fmt.Println("\nУ аккаунта включена двухфакторная аутентификация.")
 			pw, perr := newPrompter("").Password()
 			if perr != nil {
