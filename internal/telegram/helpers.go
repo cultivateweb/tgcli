@@ -84,6 +84,7 @@ func DisplayName(u *tg.User) string {
 // dialogFromElem превращает элемент диалога в строку Dialog.
 func dialogFromElem(e dialogs.Elem) Dialog {
 	var d Dialog
+	d.Peer = e.Peer
 	if dlg, ok := e.Dialog.(*tg.Dialog); ok {
 		d.Unread = dlg.UnreadCount
 	}

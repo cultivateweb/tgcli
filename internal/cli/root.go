@@ -25,6 +25,7 @@ func commands() []*Command {
 		readCmd(),
 		sendCmd(),
 		statusCmd(),
+		tuiCmd(),
 		versionCmd(),
 	}
 }

@@ -1,6 +1,10 @@
 package telegram
 
-import "time"
+import (
+	"time"
+
+	"github.com/gotd/td/tg"
+)
 
 // Message — исходящее сообщение, которое нужно отправить.
 type Message struct {
@@ -21,6 +25,9 @@ type Dialog struct {
 	Unread  int       `json:"unread"`
 	Date    time.Time `json:"date"`
 	Preview string    `json:"preview"`
+
+	// Peer адресует чат для History/Send в TUI (не сериализуется).
+	Peer tg.InputPeerClass `json:"-"`
 }
 
 // HistoryMessage — сообщение из истории чата (команда read).

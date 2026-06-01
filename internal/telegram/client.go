@@ -335,83 +335,130 @@ func requireAuth(ctx context.Context, client *telegram.Client) error {
 	return nil
 }
 
-// SendMessage отправляет текстовое сообщение и возвращает данные результата.
-func (c *Client) SendMessage(ctx context.Context, m Message) (SentMessage, error) {
-	var sent SentMessage
-	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
+// Session — открытое соединение для серии операций. Методы работают поверх
+// уже поднятого gotd-клиента, не открывая новых соединений. Используется TUI
+// (одно живое соединение на всё время работы) и одиночными командами.
+type Session struct {
+	api *tg.Client
+}
+
+// API даёт доступ к низкоуровневому клиенту gotd.
+func (s *Session) API() *tg.Client { return s.api }
+
+// WithSession открывает соединение, проверяет авторизацию и выполняет fn,
+// держа одну активную сессию всё время работы fn (подходит для TUI).
+func (c *Client) WithSession(ctx context.Context, fn func(ctx context.Context, s *Session) error) error {
+	return c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
 		if err := requireAuth(ctx, client); err != nil {
 			return err
 		}
-
-		sender := message.NewSender(client.API())
-		builder := resolveTarget(sender, m.To)
-
-		upd, err := builder.Text(ctx, m.Text)
-		if err != nil {
-			return fmt.Errorf("отправка %q: %w", m.To, err)
-		}
-		sent = sentFromUpdates(upd)
-		return nil
+		return fn(ctx, &Session{api: client.API()})
 	})
-	return sent, err
 }
 
-// Dialogs возвращает список диалогов (свежие сверху). limit ограничивает число
-// строк; onlyUnread оставляет только чаты с непрочитанными сообщениями.
-func (c *Client) Dialogs(ctx context.Context, limit int, onlyUnread bool) ([]Dialog, error) {
-	if limit <= 0 {
-		limit = 20
+// Send отправляет текстовое сообщение в чат to (@username/me/телефон).
+func (s *Session) Send(ctx context.Context, to, text string) (SentMessage, error) {
+	upd, err := resolveTarget(message.NewSender(s.api), to).Text(ctx, text)
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("отправка %q: %w", to, err)
 	}
-	var out []Dialog
-	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
-		if err := requireAuth(ctx, client); err != nil {
-			return err
-		}
-		iter := query.GetDialogs(client.API()).BatchSize(100).Iter()
-		scanned := 0
-		for len(out) < limit && iter.Next(ctx) {
-			// Защита от слишком долгого перебора, когда непрочитанных мало.
-			if scanned++; scanned > 1000 {
-				break
-			}
-			d := dialogFromElem(iter.Value())
-			if onlyUnread && d.Unread == 0 {
-				continue
-			}
-			out = append(out, d)
-		}
-		return iter.Err()
-	})
-	return out, err
+	return sentFromUpdates(upd), nil
 }
 
-// History возвращает последние limit сообщений чата to (старые сверху).
-func (c *Client) History(ctx context.Context, to string, limit int) ([]HistoryMessage, error) {
+// SendToPeer отправляет сообщение по готовому peer (для TUI, где чат выбран
+// из списка диалогов и может не иметь @username).
+func (s *Session) SendToPeer(ctx context.Context, peer tg.InputPeerClass, text string) (SentMessage, error) {
+	upd, err := message.NewSender(s.api).To(peer).Text(ctx, text)
+	if err != nil {
+		return SentMessage{}, fmt.Errorf("отправка: %w", err)
+	}
+	return sentFromUpdates(upd), nil
+}
+
+// HistoryByPeer возвращает последние limit сообщений чата по готовому peer
+// (старые сверху).
+func (s *Session) HistoryByPeer(ctx context.Context, peer tg.InputPeerClass, limit int) ([]HistoryMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	var out []HistoryMessage
-	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
-		if err := requireAuth(ctx, client); err != nil {
-			return err
+	iter := messages.NewQueryBuilder(s.api).GetHistory(peer).BatchSize(limit).Iter()
+	for len(out) < limit && iter.Next(ctx) {
+		out = append(out, historyFromElem(iter.Value()))
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// Dialogs возвращает список диалогов (свежие сверху). limit ограничивает число
+// строк; onlyUnread оставляет только чаты с непрочитанными сообщениями.
+func (s *Session) Dialogs(ctx context.Context, limit int, onlyUnread bool) ([]Dialog, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var out []Dialog
+	iter := query.GetDialogs(s.api).BatchSize(100).Iter()
+	scanned := 0
+	for len(out) < limit && iter.Next(ctx) {
+		// Защита от слишком долгого перебора, когда непрочитанных мало.
+		if scanned++; scanned > 1000 {
+			break
 		}
-		api := client.API()
-		target, err := resolveTarget(message.NewSender(api), to).AsInputPeer(ctx)
-		if err != nil {
-			return fmt.Errorf("получатель %q: %w", to, err)
+		d := dialogFromElem(iter.Value())
+		if onlyUnread && d.Unread == 0 {
+			continue
 		}
-		iter := messages.NewQueryBuilder(api).GetHistory(target).BatchSize(limit).Iter()
-		for len(out) < limit && iter.Next(ctx) {
-			out = append(out, historyFromElem(iter.Value()))
-		}
-		if err := iter.Err(); err != nil {
-			return err
-		}
-		// История приходит от новых к старым — разворачиваем (старые сверху).
-		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-			out[i], out[j] = out[j], out[i]
-		}
-		return nil
+		out = append(out, d)
+	}
+	return out, iter.Err()
+}
+
+// History возвращает последние limit сообщений чата to (старые сверху).
+func (s *Session) History(ctx context.Context, to string, limit int) ([]HistoryMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	target, err := resolveTarget(message.NewSender(s.api), to).AsInputPeer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("получатель %q: %w", to, err)
+	}
+	return s.HistoryByPeer(ctx, target, limit)
+}
+
+// SendMessage — одиночная отправка (открывает соединение на операцию).
+func (c *Client) SendMessage(ctx context.Context, m Message) (SentMessage, error) {
+	var sent SentMessage
+	err := c.WithSession(ctx, func(ctx context.Context, s *Session) error {
+		var err error
+		sent, err = s.Send(ctx, m.To, m.Text)
+		return err
+	})
+	return sent, err
+}
+
+// Dialogs — одиночный запрос списка диалогов.
+func (c *Client) Dialogs(ctx context.Context, limit int, onlyUnread bool) ([]Dialog, error) {
+	var out []Dialog
+	err := c.WithSession(ctx, func(ctx context.Context, s *Session) error {
+		var err error
+		out, err = s.Dialogs(ctx, limit, onlyUnread)
+		return err
+	})
+	return out, err
+}
+
+// History — одиночный запрос истории чата.
+func (c *Client) History(ctx context.Context, to string, limit int) ([]HistoryMessage, error) {
+	var out []HistoryMessage
+	err := c.WithSession(ctx, func(ctx context.Context, s *Session) error {
+		var err error
+		out, err = s.History(ctx, to, limit)
+		return err
 	})
 	return out, err
 }
