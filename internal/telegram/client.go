@@ -19,6 +19,7 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/cultivateweb/tgcli/internal/config"
 )
@@ -70,11 +71,17 @@ func (c *Client) run(ctx context.Context, fn func(ctx context.Context, client *t
 func (c *Client) Login(ctx context.Context) (*tg.User, error) {
 	var self *tg.User
 	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
-		flow := auth.NewFlow(newTerminalAuth(c.cfg.PhoneNumber()), auth.SendCodeOptions{})
-		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
+		// Уже авторизованы — повторный вход не нужен.
+		if st, err := client.Auth().Status(ctx); err == nil && st.Authorized {
+			if st.User != nil {
+				self = st.User
+				return nil
+			}
+			self, err = client.Self(ctx)
 			return err
 		}
-		u, err := client.Self(ctx)
+
+		u, err := signIn(ctx, client.Auth(), newPrompter(c.cfg.PhoneNumber()))
 		if err != nil {
 			return err
 		}
@@ -82,6 +89,88 @@ func (c *Client) Login(ctx context.Context) (*tg.User, error) {
 		return nil
 	})
 	return self, err
+}
+
+// signIn проводит интерактивный вход вручную (вместо высокоуровневого
+// auth.Flow), чтобы поддержать повторную отправку кода: пользователь может
+// запросить новый код, а при ответе сервера PHONE_CODE_EXPIRED код
+// перезапрашивается автоматически.
+func signIn(ctx context.Context, a *auth.Client, p *prompter) (*tg.User, error) {
+	phone, err := p.Phone()
+	if err != nil {
+		return nil, err
+	}
+
+	code, err := sentCode(a.SendCode(ctx, phone, auth.SendCodeOptions{}))
+	if err != nil {
+		return nil, fmt.Errorf("отправка кода: %w", err)
+	}
+
+	for {
+		input, resend, err := p.Code(code)
+		if err != nil {
+			return nil, err
+		}
+		if resend {
+			code, err = sentCode(a.ResendCode(ctx, phone, code.PhoneCodeHash))
+			if err != nil {
+				return nil, fmt.Errorf("повторная отправка кода: %w", err)
+			}
+			fmt.Println("Код отправлен повторно.")
+			continue
+		}
+
+		authz, err := a.SignIn(ctx, phone, input, code.PhoneCodeHash)
+		switch {
+		case errors.Is(err, auth.ErrPasswordAuthNeeded):
+			pw, perr := p.Password()
+			if perr != nil {
+				return nil, perr
+			}
+			authz, err = a.Password(ctx, pw)
+			if err != nil {
+				return nil, fmt.Errorf("двухфакторная аутентификация: %w", err)
+			}
+		case tgerr.Is(err, "PHONE_CODE_EXPIRED"):
+			fmt.Println("Код истёк, запрашиваю новый…")
+			code, err = sentCode(a.ResendCode(ctx, phone, code.PhoneCodeHash))
+			if err != nil {
+				return nil, fmt.Errorf("повторная отправка кода: %w", err)
+			}
+			continue
+		case tgerr.Is(err, "PHONE_CODE_INVALID"):
+			fmt.Println("Неверный код. Попробуйте ещё раз.")
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("вход по коду: %w", err)
+		}
+
+		return userFromAuth(authz)
+	}
+}
+
+// sentCode приводит ответ SendCode/ResendCode к *tg.AuthSentCode.
+func sentCode(sent tg.AuthSentCodeClass, err error) (*tg.AuthSentCode, error) {
+	if err != nil {
+		return nil, err
+	}
+	code, ok := sent.(*tg.AuthSentCode)
+	if !ok {
+		return nil, fmt.Errorf("неожиданный ответ сервера на отправку кода: %T", sent)
+	}
+	return code, nil
+}
+
+// userFromAuth достаёт пользователя из ответа авторизации.
+func userFromAuth(a *tg.AuthAuthorization) (*tg.User, error) {
+	if a == nil {
+		return nil, errors.New("пустой ответ авторизации")
+	}
+	u, ok := a.User.(*tg.User)
+	if !ok {
+		return nil, fmt.Errorf("неожиданный тип пользователя в ответе: %T", a.User)
+	}
+	return u, nil
 }
 
 // Logout завершает сессию на сервере и удаляет локальный файл сессии.
