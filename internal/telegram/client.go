@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -40,8 +42,15 @@ func (c *Client) newGotd() (*telegram.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// gotd FileStorage пишет сессию голым os.WriteFile и каталог не создаёт.
+	// Если каталога нет, сохранение сессии падает и роняет соединение gotd
+	// («engine was closed»), а сессия не персистится между запусками.
+	sessionPath := c.cfg.SessionPath()
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
+		return nil, fmt.Errorf("создание каталога сессии: %w", err)
+	}
 	return telegram.NewClient(apiID, apiHash, telegram.Options{
-		SessionStorage: &session.FileStorage{Path: c.cfg.SessionPath()},
+		SessionStorage: &session.FileStorage{Path: sessionPath},
 	}), nil
 }
 
@@ -61,7 +70,7 @@ func (c *Client) run(ctx context.Context, fn func(ctx context.Context, client *t
 func (c *Client) Login(ctx context.Context) (*tg.User, error) {
 	var self *tg.User
 	err := c.run(ctx, func(ctx context.Context, client *telegram.Client) error {
-		flow := auth.NewFlow(newTerminalAuth(c.cfg.Phone), auth.SendCodeOptions{})
+		flow := auth.NewFlow(newTerminalAuth(c.cfg.PhoneNumber()), auth.SendCodeOptions{})
 		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
 			return err
 		}

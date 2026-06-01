@@ -4,6 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
+
+	"golang.org/x/term"
 
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
@@ -26,6 +29,14 @@ func authCmd() *Command {
 				}
 				fmt.Println("Сессия завершена.")
 				return nil
+			}
+
+			// Вход интерактивный: нужно ввести код (и, возможно, номер и 2FA-пароль).
+			// Без терминала чтение stdin сразу даёт EOF — даём понятную ошибку.
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return fmt.Errorf("для входа нужен интерактивный терминал (ввод кода из Telegram).\n" +
+					"Откройте обычное окно терминала и выполните «tgcli auth».\n" +
+					"Если вы в Claude Code — не запускайте команду через префикс «!»: там нет ввода с клавиатуры")
 			}
 
 			self, err := client.Login(ctx)

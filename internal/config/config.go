@@ -21,6 +21,7 @@ import (
 const (
 	EnvAPIID   = "TGCLI_API_ID"
 	EnvAPIHash = "TGCLI_API_HASH"
+	EnvPhone   = "TGCLI_PHONE"
 )
 
 // Config — настройки приложения.
@@ -61,6 +62,15 @@ func (c *Config) Credentials() (apiID int, apiHash string, err error) {
 		return 0, "", ErrNoCredentials
 	}
 	return apiID, apiHash, nil
+}
+
+// PhoneNumber возвращает номер телефона с приоритетом окружения над файлом.
+// Пустая строка означает, что номер спросят интерактивно при входе.
+func (c *Config) PhoneNumber() string {
+	if v := os.Getenv(EnvPhone); v != "" {
+		return v
+	}
+	return c.Phone
 }
 
 // SessionPath — путь к файлу сессии gotd, рядом с файлом конфигурации.
