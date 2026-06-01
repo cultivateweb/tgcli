@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -103,7 +104,7 @@ func signIn(ctx context.Context, a *auth.Client, p *prompter) (*tg.User, error) 
 
 	code, err := sentCode(a.SendCode(ctx, phone, auth.SendCodeOptions{}))
 	if err != nil {
-		return nil, fmt.Errorf("отправка кода: %w", err)
+		return nil, authError("отправка кода", err)
 	}
 
 	for {
@@ -114,7 +115,7 @@ func signIn(ctx context.Context, a *auth.Client, p *prompter) (*tg.User, error) 
 		if resend {
 			code, err = sentCode(a.ResendCode(ctx, phone, code.PhoneCodeHash))
 			if err != nil {
-				return nil, fmt.Errorf("повторная отправка кода: %w", err)
+				return nil, authError("повторная отправка кода", err)
 			}
 			fmt.Println("Код отправлен повторно.")
 			continue
@@ -129,24 +130,61 @@ func signIn(ctx context.Context, a *auth.Client, p *prompter) (*tg.User, error) 
 			}
 			authz, err = a.Password(ctx, pw)
 			if err != nil {
-				return nil, fmt.Errorf("двухфакторная аутентификация: %w", err)
+				return nil, authError("двухфакторная аутентификация", err)
 			}
 		case tgerr.Is(err, "PHONE_CODE_EXPIRED"):
 			fmt.Println("Код истёк, запрашиваю новый…")
 			code, err = sentCode(a.ResendCode(ctx, phone, code.PhoneCodeHash))
 			if err != nil {
-				return nil, fmt.Errorf("повторная отправка кода: %w", err)
+				return nil, authError("повторная отправка кода", err)
 			}
 			continue
 		case tgerr.Is(err, "PHONE_CODE_INVALID"):
 			fmt.Println("Неверный код. Попробуйте ещё раз.")
 			continue
 		case err != nil:
-			return nil, fmt.Errorf("вход по коду: %w", err)
+			return nil, authError("вход по коду", err)
 		}
 
 		return userFromAuth(authz)
 	}
+}
+
+// authError возвращает понятное объяснение для известных ошибок авторизации,
+// а для прочих — добавляет контекст к исходной ошибке.
+func authError(context string, err error) error {
+	if friendly := friendlyAuthError(err); friendly != err {
+		return friendly
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
+// friendlyAuthError переводит типовые ошибки Telegram в понятные сообщения.
+// Если ошибка не распознана — возвращает её без изменений.
+func friendlyAuthError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if d, ok := tgerr.AsFloodWait(err); ok {
+		return fmt.Errorf("Telegram просит подождать перед следующей попыткой входа: %s. "+
+			"Это анти-спам — не запускайте «auth» до истечения этого времени", d.Round(time.Second))
+	}
+	switch {
+	case tgerr.Is(err, "SEND_CODE_UNAVAILABLE"):
+		return errors.New("Telegram временно не отправляет код на этот номер — обычно из-за " +
+			"частых запросов кода за короткое время. Это ограничение на стороне Telegram, " +
+			"а не ошибка tgcli. Подождите несколько часов (иногда до суток) и попробуйте ОДИН раз, " +
+			"не повторяя «auth» подряд")
+	case tgerr.Is(err, "PHONE_NUMBER_INVALID"):
+		return errors.New("неверный номер телефона: проверьте формат, например +380731234567")
+	case tgerr.Is(err, "PHONE_NUMBER_BANNED"):
+		return errors.New("этот номер заблокирован в Telegram")
+	case tgerr.Is(err, "PHONE_NUMBER_UNOCCUPIED"):
+		return errors.New("на этот номер ещё нет аккаунта Telegram: сначала зарегистрируйтесь в официальном клиенте")
+	case tgerr.Is(err, "PHONE_PASSWORD_FLOOD"):
+		return errors.New("слишком много попыток ввода пароля 2FA — подождите и попробуйте позже")
+	}
+	return err
 }
 
 // sentCode приводит ответ SendCode/ResendCode к *tg.AuthSentCode.
