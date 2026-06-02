@@ -404,6 +404,25 @@ func (s *Session) Send(ctx context.Context, to, text string) (SentMessage, error
 	return sentFromUpdates(upd), nil
 }
 
+// DeleteMessages удаляет сообщения по id в чате peer (revoke — у всех участников).
+func (s *Session) DeleteMessages(ctx context.Context, peer tg.InputPeerClass, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if ch, ok := peer.(*tg.InputPeerChannel); ok {
+		_, err := s.api.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash},
+			ID:      ids,
+		})
+		return err
+	}
+	_, err := s.api.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
+		Revoke: true,
+		ID:     ids,
+	})
+	return err
+}
+
 // SendToPeer отправляет сообщение по готовому peer (для TUI, где чат выбран
 // из списка диалогов и может не иметь @username).
 func (s *Session) SendToPeer(ctx context.Context, peer tg.InputPeerClass, text string) (SentMessage, error) {
