@@ -60,9 +60,11 @@ type ui struct {
 	tree     *tview.TreeView
 	messages *tview.TextView
 	input    *tview.TextArea
-	details  *tview.TextView
+	details  *tview.List
 	status   *tview.TextView
 	mid      *tview.Flex
+
+	detailValues []string // значения элементов панели «Детали» (для копирования)
 
 	dialogs     []telegram.Dialog
 	open        *telegram.Dialog
@@ -170,11 +172,35 @@ func (u *ui) build() {
 		return ev
 	})
 
-	u.details = tview.NewTextView().SetDynamicColors(true).SetScrollable(true)
+	u.details = tview.NewList().ShowSecondaryText(true)
 	u.details.SetBorder(true).SetTitle(" Детали ").SetBorderColor(hex("#3b4261"))
+	u.details.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Rune() == 'c' {
+			i := u.details.GetCurrentItem()
+			if i >= 0 && i < len(u.detailValues) {
+				if err := clipboard.WriteAll(u.detailValues[i]); err != nil {
+					u.status.SetText("[#f7768e]Буфер недоступен (нужен xclip/xsel/wl-clipboard)[-]")
+				} else {
+					u.status.SetText("[#9ece6a]Скопировано[-]  " + statusHints())
+				}
+			}
+			return nil
+		}
+		return ev
+	})
 
 	u.status = tview.NewTextView().SetDynamicColors(true)
 	u.status.SetText(statusHints())
+
+	// Заголовок окна терминала отражает открытый чат.
+	u.app.SetBeforeDrawFunc(func(s tcell.Screen) bool {
+		title := "tgcli"
+		if u.open != nil {
+			title = "tgcli — " + u.open.Title
+		}
+		s.SetTitle(title)
+		return false
+	})
 
 	// Глобальные хоткеи.
 	u.app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
@@ -408,15 +434,22 @@ func (u *ui) renderMessages() {
 }
 
 func (u *ui) renderDetails() {
+	u.details.Clear()
+	u.detailValues = nil
 	if u.open == nil {
-		u.details.SetText("")
 		return
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "[::b]%s[-:-:-]\n\n", tview.Escape(u.open.Title))
-	fmt.Fprintf(&b, "[#565f89]Тип:[-]  %s\n", u.open.Kind)
-	fmt.Fprintf(&b, "[#565f89]ID:[-]   %s\n", u.open.Ref.Key())
-	u.details.SetText(b.String())
+	add := func(label, value string) {
+		u.details.AddItem(label, value, 0, nil)
+		u.detailValues = append(u.detailValues, value)
+	}
+	add("Имя", u.open.Title)
+	add("Тип", u.open.Kind)
+	add("ID", u.open.Ref.Key())
+	if u.open.Unread > 0 {
+		add("Непрочитано", fmt.Sprint(u.open.Unread))
+	}
+	u.details.SetTitle(" Детали — c копировать ")
 }
 
 // ── Действия над сообщениями ───────────────────────────────────────────────
