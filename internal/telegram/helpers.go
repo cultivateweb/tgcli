@@ -168,6 +168,61 @@ func oneLine(s string) string {
 	return s
 }
 
+// newMessageFrom преобразует сообщение из обновления в NewMessage для подписчиков.
+func newMessageFrom(msg tg.MessageClass, ent tg.Entities) (NewMessage, bool) {
+	m, ok := msg.(*tg.Message)
+	if !ok {
+		return NewMessage{}, false
+	}
+	key := peerKey(m.PeerID)
+	if key == "" {
+		return NewMessage{}, false
+	}
+	text := m.Message
+	hm := HistoryMessage{
+		ID:     int64(m.ID),
+		Date:   time.Unix(int64(m.Date), 0),
+		Out:    m.Out,
+		Text:   text,
+		Author: liveAuthor(m, ent),
+	}
+	return NewMessage{PeerKey: key, Message: hm}, true
+}
+
+// liveAuthor определяет автора входящего сообщения из обновления.
+func liveAuthor(m *tg.Message, ent tg.Entities) string {
+	if m.Out {
+		return "Вы"
+	}
+	if from, ok := m.GetFromID(); ok {
+		if pu, ok := from.(*tg.PeerUser); ok {
+			if u, ok := ent.Users[pu.UserID]; ok {
+				return DisplayName(u)
+			}
+		}
+	}
+	// Для личной переписки автор — собеседник (peer сообщения).
+	if pu, ok := m.PeerID.(*tg.PeerUser); ok {
+		if u, ok := ent.Users[pu.UserID]; ok {
+			return DisplayName(u)
+		}
+	}
+	return "—"
+}
+
+// peerKey строит ключ чата (совпадает с PeerRef.Key()) из Peer обновления.
+func peerKey(p tg.PeerClass) string {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		return "user:" + strconv.FormatInt(v.UserID, 10)
+	case *tg.PeerChat:
+		return "chat:" + strconv.FormatInt(v.ChatID, 10)
+	case *tg.PeerChannel:
+		return "channel:" + strconv.FormatInt(v.ChannelID, 10)
+	}
+	return ""
+}
+
 // removeSession удаляет файл сессии; отсутствие файла ошибкой не считается.
 func removeSession(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {

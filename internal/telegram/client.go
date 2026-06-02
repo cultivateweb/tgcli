@@ -356,6 +356,45 @@ func (c *Client) WithSession(ctx context.Context, fn func(ctx context.Context, s
 	})
 }
 
+// WithLiveSession — как WithSession, но клиент создаётся с обработчиком
+// обновлений, и fn получает канал входящих сообщений (live). Канал закрывается
+// при завершении работы.
+func (c *Client) WithLiveSession(ctx context.Context, fn func(ctx context.Context, s *Session, updates <-chan NewMessage) error) error {
+	apiID, apiHash, opts, err := c.baseOptions()
+	if err != nil {
+		return err
+	}
+	dispatcher := tg.NewUpdateDispatcher()
+	updates := make(chan NewMessage, 128)
+	push := func(msg tg.MessageClass, ent tg.Entities) {
+		if nm, ok := newMessageFrom(msg, ent); ok {
+			// Не блокируем обработчик обновлений, если подписчик не успевает.
+			select {
+			case updates <- nm:
+			default:
+			}
+		}
+	}
+	dispatcher.OnNewMessage(func(_ context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
+		push(u.Message, e)
+		return nil
+	})
+	dispatcher.OnNewChannelMessage(func(_ context.Context, e tg.Entities, u *tg.UpdateNewChannelMessage) error {
+		push(u.Message, e)
+		return nil
+	})
+	opts.UpdateHandler = dispatcher
+
+	client := telegram.NewClient(apiID, apiHash, opts)
+	return client.Run(ctx, func(ctx context.Context) error {
+		if err := requireAuth(ctx, client); err != nil {
+			return err
+		}
+		defer close(updates)
+		return fn(ctx, &Session{api: client.API()}, updates)
+	})
+}
+
 // Send отправляет текстовое сообщение в чат to (@username/me/телефон).
 func (s *Session) Send(ctx context.Context, to, text string) (SentMessage, error) {
 	upd, err := resolveTarget(message.NewSender(s.api), to).Text(ctx, text)

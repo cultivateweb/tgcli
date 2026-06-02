@@ -33,6 +33,13 @@ type Dialog struct {
 	Peer tg.InputPeerClass `json:"-"`
 }
 
+// NewMessage — сообщение из потока обновлений (live): к какому чату относится
+// (PeerKey совпадает с PeerRef.Key()) и само сообщение.
+type NewMessage struct {
+	PeerKey string
+	Message HistoryMessage
+}
+
 // PeerRef — компактная сериализуемая ссылка на собеседника/чат: тип, id и
 // access_hash. Нужна, чтобы хранить диалоги в кеше и восстанавливать InputPeer.
 type PeerRef struct {

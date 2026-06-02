@@ -30,9 +30,10 @@ func tuiCmd() *Command {
 			}
 
 			client := telegram.New(env.Config)
-			// Держим одно соединение всё время работы интерфейса.
-			return client.WithSession(ctx, func(ctx context.Context, s *telegram.Session) error {
-				return tui.Run(ctx, s, c)
+			// Держим одно соединение всё время работы интерфейса; с потоком
+			// обновлений входящие сообщения прилетают в TUI сами.
+			return client.WithLiveSession(ctx, func(ctx context.Context, s *telegram.Session, updates <-chan telegram.NewMessage) error {
+				return tui.Run(ctx, s, c, updates)
 			})
 		},
 	}

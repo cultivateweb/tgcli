@@ -20,9 +20,25 @@ import (
 )
 
 // Run запускает TUI поверх открытой сессии (соединение держится всё время).
-// c может быть nil — тогда работаем без кеша.
-func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache) error {
+// c может быть nil — тогда работаем без кеша. updates может быть nil — тогда
+// без live-обновлений; иначе входящие сообщения прилетают в интерфейс сами.
+func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage) error {
 	p := tea.NewProgram(newModel(ctx, sess, c), tea.WithAltScreen(), tea.WithContext(ctx))
+	if updates != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case nm, ok := <-updates:
+					if !ok {
+						return
+					}
+					p.Send(liveMsg{nm})
+				}
+			}
+		}()
+	}
 	_, err := p.Run()
 	return err
 }
@@ -66,6 +82,9 @@ type historyMsg struct {
 	cached bool
 }
 type sentMsg struct{ err error }
+
+// liveMsg — входящее сообщение из потока обновлений.
+type liveMsg struct{ nm telegram.NewMessage }
 
 var (
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
@@ -197,8 +216,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.SetValue("")
 		return m, m.loadHistoryNet(m.openTo)
 
+	case liveMsg:
+		return m.handleLive(msg.nm)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+// handleLive обрабатывает входящее сообщение: дописывает в открытый чат и
+// обновляет счётчик непрочитанных в списке.
+func (m model) handleLive(nm telegram.NewMessage) (tea.Model, tea.Cmd) {
+	openKey := ""
+	if m.screen == chatScreen {
+		openKey = m.openTo.Ref.Key()
+	}
+	if nm.PeerKey == openKey {
+		m.history = append(m.history, nm.Message)
+		if m.cache != nil {
+			_ = m.cache.SaveHistory(openKey, m.history)
+		}
+	}
+	for i := range m.dialogs {
+		if m.dialogs[i].Ref.Key() == nm.PeerKey {
+			m.dialogs[i].Date = nm.Message.Date
+			m.dialogs[i].Preview = strings.ReplaceAll(nm.Message.Text, "\n", " ")
+			if nm.PeerKey != openKey && !nm.Message.Out {
+				m.dialogs[i].Unread++
+			}
+			break
+		}
 	}
 	return m, nil
 }
