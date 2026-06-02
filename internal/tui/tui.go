@@ -120,8 +120,8 @@ func applyTheme() {
 	tview.Styles.PrimitiveBackgroundColor = hex("#0000a8")    // Borland blue
 	tview.Styles.ContrastBackgroundColor = hex("#008080")     // teal — выделение
 	tview.Styles.MoreContrastBackgroundColor = hex("#00a8a8") // cyan
-	tview.Styles.BorderColor = hex("#aaaaaa")                 // светло-серые рамки
-	tview.Styles.TitleColor = hex("#ffff55")                  // жёлтые заголовки
+	tview.Styles.BorderColor = hex("#5ec4d6")                 // голубые двойные рамки
+	tview.Styles.TitleColor = hex("#ffffff")                  // белые заголовки окон
 	tview.Styles.PrimaryTextColor = hex("#ffff55")            // жёлтый текст (Turbo)
 	tview.Styles.SecondaryTextColor = hex("#ffffff")          // белый
 	tview.Styles.TertiaryTextColor = hex("#aaaaaa")           // серый
@@ -132,7 +132,7 @@ func (u *ui) build() {
 	hex := func(s string) tcell.Color { return tcell.GetColor(s) }
 
 	u.tree = tview.NewTreeView()
-	u.tree.SetBorder(true).SetTitle(" Чаты ").SetBorderColor(hex("#aaaaaa"))
+	u.tree.SetBorder(true).SetTitle(" Чаты ")
 	u.tree.SetGraphics(true)
 	u.tree.SetSelectedFunc(func(node *tview.TreeNode) {
 		if ref := node.GetReference(); ref != nil {
@@ -145,7 +145,7 @@ func (u *ui) build() {
 
 	u.messages = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWrap(true)
 	u.messages.SetRegions(true)
-	u.messages.SetBorder(true).SetTitle(" Сообщения ").SetBorderColor(hex("#aaaaaa"))
+	u.messages.SetBorder(true).SetTitle(" Сообщения ")
 	u.messages.SetFocusFunc(func() { u.status.SetText(msgHints()) })
 	u.messages.SetBlurFunc(func() { u.status.SetText(statusHints()) })
 	u.messages.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
@@ -185,7 +185,7 @@ func (u *ui) build() {
 
 	u.input = tview.NewTextArea()
 	u.input.SetPlaceholder("Сообщение…  (Enter — отправить, Alt+Enter — перенос строки)")
-	u.input.SetBorder(true).SetTitle(" Ввод ").SetBorderColor(hex("#aaaaaa"))
+	u.input.SetBorder(true).SetTitle(" Ввод ")
 	u.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt == 0 {
 			text := strings.TrimSpace(u.input.GetText())
@@ -198,7 +198,7 @@ func (u *ui) build() {
 	})
 
 	u.details = tview.NewList().ShowSecondaryText(true)
-	u.details.SetBorder(true).SetTitle(" Детали ").SetBorderColor(hex("#aaaaaa"))
+	u.details.SetBorder(true).SetTitle(" Детали ")
 	u.details.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Rune() == 'c' {
 			i := u.details.GetCurrentItem()
@@ -216,7 +216,7 @@ func (u *ui) build() {
 
 	// Нижняя строка состояния в стиле Borland: cyan-фон, подсказки горячих клавиш.
 	u.status = tview.NewTextView().SetDynamicColors(true)
-	u.status.SetBackgroundColor(hex("#00a8a8"))
+	u.status.SetBackgroundColor(hex("#aaaaaa"))
 	u.status.SetText(statusHints())
 
 	// Заголовок окна терминала отражает открытый чат.
@@ -232,8 +232,11 @@ func (u *ui) build() {
 	// Глобальные хоткеи.
 	u.app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		switch ev.Key() {
-		case tcell.KeyCtrlC:
+		case tcell.KeyCtrlC, tcell.KeyF10:
 			u.app.Stop()
+			return nil
+		case tcell.KeyF1:
+			u.showHelp()
 			return nil
 		case tcell.KeyTab:
 			u.cycleFocus()
@@ -258,8 +261,9 @@ func (u *ui) root() *tview.Flex {
 	u.showTree = true
 	u.rebuildMid()
 
-	header := tview.NewTextView().SetDynamicColors(true).
-		SetText(fmt.Sprintf("[#ffff55::b]tgcli[-:-:-] [white]%s[-]  [white]— Telegram[-]", u.version))
+	header := tview.NewTextView().SetDynamicColors(true)
+	header.SetBackgroundColor(tcell.GetColor("#aaaaaa"))
+	header.SetText(menuBar())
 
 	return tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(header, 1, 0, false).
@@ -641,6 +645,24 @@ func (u *ui) reloadHistory(d telegram.Dialog) {
 	})
 }
 
+// showHelp показывает окно справки по горячим клавишам.
+func (u *ui) showHelp() {
+	help := "tgcli — горячие клавиши\n\n" +
+		"Tab — фокус между панелями\n" +
+		"Ctrl+B — панель чатов   Ctrl+E — панель деталей\n" +
+		"Enter — открыть чат / отправить   Alt+Enter — перенос строки\n\n" +
+		"В панели сообщений:\n" +
+		"↑↓/Home/End — выбор   c — копировать   r — цитировать\n" +
+		"Space — пометить   y — копировать выбранные   d — удалить\n\n" +
+		"F1 — эта справка   F10 / Ctrl+C — выход"
+	modal := tview.NewModal().SetText(help).AddButtons([]string{"OK"}).
+		SetDoneFunc(func(_ int, _ string) {
+			u.pages.RemovePage("help")
+			u.app.SetFocus(u.tree)
+		})
+	u.pages.AddPage("help", modal, true, true)
+}
+
 // confirm показывает модальное окно подтверждения поверх интерфейса.
 func (u *ui) confirm(text string, onYes func()) {
 	modal := tview.NewModal().SetText(text).
@@ -655,26 +677,36 @@ func (u *ui) confirm(text string, onYes func()) {
 	u.pages.AddPage("confirm", modal, true, true)
 }
 
+// menuBar — верхняя строка-меню в стиле Turbo Pascal: серый фон, пункты с
+// красной горячей буквой (декоративно — функциональное меню пока не сделано).
+func menuBar() string {
+	item := func(hot, rest string) string {
+		return "[#b00000::b]" + hot + "[#101010::-]" + rest
+	}
+	return "  " + item("Ч", "аты") + "    " + item("П", "оиск") + "    " +
+		item("В", "ид") + "    " + item("С", "правка")
+}
+
 // borlandBar рисует подсказки горячих клавиш в стиле статус-строки Turbo Pascal:
-// клавиша белым жирным, описание тёмным — всё на cyan-фоне виджета.
+// серый фон, клавиша и описание чёрным, клавиша — жирная.
 func borlandBar(items [][2]string) string {
 	var b strings.Builder
 	for _, it := range items {
-		fmt.Fprintf(&b, " [white::b]%s[#08243a::-] %s ", it[0], it[1])
+		fmt.Fprintf(&b, " [#101010::b]%s[#101010::-] %s ", it[0], it[1])
 	}
 	return b.String()
 }
 
 func statusHints() string {
 	return borlandBar([][2]string{
-		{"Tab", "Фокус"}, {"^B", "Чаты"}, {"^E", "Детали"},
-		{"Enter", "Отпр"}, {"^C", "Выход"},
+		{"F1", "Справка"}, {"Tab", "Фокус"}, {"^B", "Чаты"},
+		{"^E", "Детали"}, {"Enter", "Отпр"}, {"F10", "Выход"},
 	})
 }
 
 func msgHints() string {
 	return borlandBar([][2]string{
 		{"↑↓", "Сообщ"}, {"c", "Копир"}, {"r", "Цитата"},
-		{"d", "Удал"}, {"Spc", "Выбор"}, {"y", "Копир✓"}, {"Tab", "Фокус"},
+		{"d", "Удал"}, {"Spc", "Выбор"}, {"y", "Копир✓"}, {"F10", "Выход"},
 	})
 }
