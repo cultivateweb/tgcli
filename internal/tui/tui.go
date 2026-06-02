@@ -63,12 +63,14 @@ type ui struct {
 	details  *tview.List
 	status   *tview.TextView
 	mid      *tview.Flex
+	center   *tview.Flex
 
 	detailValues []string // значения элементов панели «Детали» (для копирования)
 
 	dialogs     []telegram.Dialog
 	open        *telegram.Dialog
 	history     []telegram.HistoryMessage
+	showTree    bool
 	showDetails bool
 
 	msgSel   int          // индекс выбранного сообщения
@@ -77,7 +79,7 @@ type ui struct {
 
 // Run строит и запускает интерфейс. c и updates могут быть nil.
 func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage, version string) error {
-	roundBorders()
+	turboBorders()
 	applyTheme()
 	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
 		app: tview.NewApplication(), selected: map[int]bool{}}
@@ -96,34 +98,41 @@ func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-
 	return u.app.SetRoot(u.pages, true).EnableMouse(true).Run()
 }
 
-// roundBorders включает скруглённые углы у всех рамок.
-func roundBorders() {
-	tview.Borders.TopLeft = '╭'
-	tview.Borders.TopRight = '╮'
-	tview.Borders.BottomLeft = '╰'
-	tview.Borders.BottomRight = '╯'
+// turboBorders включает двойные рамки в стиле Turbo Pascal / Borland.
+func turboBorders() {
+	tview.Borders.Horizontal = '═'
+	tview.Borders.Vertical = '║'
+	tview.Borders.TopLeft = '╔'
+	tview.Borders.TopRight = '╗'
+	tview.Borders.BottomLeft = '╚'
+	tview.Borders.BottomRight = '╝'
+	tview.Borders.LeftT = '╠'
+	tview.Borders.RightT = '╣'
+	tview.Borders.TopT = '╦'
+	tview.Borders.BottomT = '╩'
+	tview.Borders.Cross = '╬'
 }
 
-// applyTheme задаёт палитру в стиле Telegram: приглушённый сине-небесный фон
-// вместо чёрного, голубые акценты. Должна вызываться до создания виджетов.
+// applyTheme задаёт палитру в стиле Turbo Pascal: насыщенный синий фон,
+// жёлтый текст, серые рамки. Должна вызываться до создания виджетов.
 func applyTheme() {
 	hex := func(s string) tcell.Color { return tcell.GetColor(s) }
-	tview.Styles.PrimitiveBackgroundColor = hex("#17212b") // основной фон (тёмно-синий)
-	tview.Styles.ContrastBackgroundColor = hex("#2b5278")  // выделение (синий Telegram)
-	tview.Styles.MoreContrastBackgroundColor = hex("#3a6a99")
-	tview.Styles.BorderColor = hex("#36506b")
-	tview.Styles.TitleColor = hex("#6ab3f3")
-	tview.Styles.PrimaryTextColor = hex("#c5d0db")
-	tview.Styles.SecondaryTextColor = hex("#6ab3f3")
-	tview.Styles.TertiaryTextColor = hex("#7f91a4")
-	tview.Styles.InverseTextColor = hex("#17212b")
+	tview.Styles.PrimitiveBackgroundColor = hex("#0000a8")    // Borland blue
+	tview.Styles.ContrastBackgroundColor = hex("#008080")     // teal — выделение
+	tview.Styles.MoreContrastBackgroundColor = hex("#00a8a8") // cyan
+	tview.Styles.BorderColor = hex("#aaaaaa")                 // светло-серые рамки
+	tview.Styles.TitleColor = hex("#ffff55")                  // жёлтые заголовки
+	tview.Styles.PrimaryTextColor = hex("#ffff55")            // жёлтый текст (Turbo)
+	tview.Styles.SecondaryTextColor = hex("#ffffff")          // белый
+	tview.Styles.TertiaryTextColor = hex("#aaaaaa")           // серый
+	tview.Styles.InverseTextColor = hex("#0000a8")
 }
 
 func (u *ui) build() {
 	hex := func(s string) tcell.Color { return tcell.GetColor(s) }
 
 	u.tree = tview.NewTreeView()
-	u.tree.SetBorder(true).SetTitle(" Чаты ").SetBorderColor(hex("#3b4261"))
+	u.tree.SetBorder(true).SetTitle(" Чаты ").SetBorderColor(hex("#aaaaaa"))
 	u.tree.SetGraphics(true)
 	u.tree.SetSelectedFunc(func(node *tview.TreeNode) {
 		if ref := node.GetReference(); ref != nil {
@@ -136,7 +145,7 @@ func (u *ui) build() {
 
 	u.messages = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWrap(true)
 	u.messages.SetRegions(true)
-	u.messages.SetBorder(true).SetTitle(" Сообщения ").SetBorderColor(hex("#3b4261"))
+	u.messages.SetBorder(true).SetTitle(" Сообщения ").SetBorderColor(hex("#aaaaaa"))
 	u.messages.SetFocusFunc(func() { u.status.SetText(msgHints()) })
 	u.messages.SetBlurFunc(func() { u.status.SetText(statusHints()) })
 	u.messages.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
@@ -176,7 +185,7 @@ func (u *ui) build() {
 
 	u.input = tview.NewTextArea()
 	u.input.SetPlaceholder("Сообщение…  (Enter — отправить, Alt+Enter — перенос строки)")
-	u.input.SetBorder(true).SetTitle(" Ввод ").SetBorderColor(hex("#3b4261"))
+	u.input.SetBorder(true).SetTitle(" Ввод ").SetBorderColor(hex("#aaaaaa"))
 	u.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt == 0 {
 			text := strings.TrimSpace(u.input.GetText())
@@ -189,7 +198,7 @@ func (u *ui) build() {
 	})
 
 	u.details = tview.NewList().ShowSecondaryText(true)
-	u.details.SetBorder(true).SetTitle(" Детали ").SetBorderColor(hex("#3b4261"))
+	u.details.SetBorder(true).SetTitle(" Детали ").SetBorderColor(hex("#aaaaaa"))
 	u.details.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Rune() == 'c' {
 			i := u.details.GetCurrentItem()
@@ -205,15 +214,10 @@ func (u *ui) build() {
 		return ev
 	})
 
+	// Нижняя строка состояния в стиле Borland: cyan-фон, подсказки горячих клавиш.
 	u.status = tview.NewTextView().SetDynamicColors(true)
+	u.status.SetBackgroundColor(hex("#00a8a8"))
 	u.status.SetText(statusHints())
-
-	// Псевдо-градиент: панели слева-направо чуть светлеют — даёт ощущение
-	// диагонали тёмно→светло без посимвольной отрисовки фона.
-	u.tree.SetBackgroundColor(hex("#17212b"))
-	u.messages.SetBackgroundColor(hex("#1a2533"))
-	u.input.SetBackgroundColor(hex("#1d2a3a"))
-	u.details.SetBackgroundColor(hex("#20303f"))
 
 	// Заголовок окна терминала отражает открытый чат.
 	u.app.SetBeforeDrawFunc(func(s tcell.Screen) bool {
@@ -234,6 +238,9 @@ func (u *ui) build() {
 		case tcell.KeyTab:
 			u.cycleFocus()
 			return nil
+		case tcell.KeyCtrlB:
+			u.toggleTree()
+			return nil
 		case tcell.KeyCtrlE:
 			u.toggleDetails()
 			return nil
@@ -243,21 +250,33 @@ func (u *ui) build() {
 }
 
 func (u *ui) root() *tview.Flex {
-	center := tview.NewFlex().SetDirection(tview.FlexRow).
+	u.center = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(u.messages, 0, 1, false).
 		AddItem(u.input, 5, 0, false)
 
-	u.mid = tview.NewFlex().
-		AddItem(u.tree, 32, 0, true).
-		AddItem(center, 0, 1, false)
+	u.mid = tview.NewFlex()
+	u.showTree = true
+	u.rebuildMid()
 
 	header := tview.NewTextView().SetDynamicColors(true).
-		SetText(fmt.Sprintf("[#7dcfff::b]tgcli[-:-:-] [::d]%s[-:-:-]  [::d]— Telegram[-:-:-]", u.version))
+		SetText(fmt.Sprintf("[#ffff55::b]tgcli[-:-:-] [white]%s[-]  [white]— Telegram[-]", u.version))
 
 	return tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(header, 1, 0, false).
 		AddItem(u.mid, 0, 1, false).
 		AddItem(u.status, 1, 0, false)
+}
+
+// rebuildMid пересобирает среднюю строку из видимых панелей (чаты | центр | детали).
+func (u *ui) rebuildMid() {
+	u.mid.Clear()
+	if u.showTree {
+		u.mid.AddItem(u.tree, 32, 0, false)
+	}
+	u.mid.AddItem(u.center, 0, 1, false)
+	if u.showDetails {
+		u.mid.AddItem(u.details, 34, 0, false)
+	}
 }
 
 // ── Фокус и панели ─────────────────────────────────────────────────────────
@@ -280,16 +299,24 @@ func (u *ui) cycleFocus() {
 	u.app.SetFocus(u.tree)
 }
 
+func (u *ui) toggleTree() {
+	u.showTree = !u.showTree
+	u.rebuildMid()
+	if u.showTree {
+		u.app.SetFocus(u.tree)
+	} else if u.app.GetFocus() == u.tree {
+		u.app.SetFocus(u.messages)
+	}
+}
+
 func (u *ui) toggleDetails() {
 	u.showDetails = !u.showDetails
 	if u.showDetails {
 		u.renderDetails()
-		u.mid.AddItem(u.details, 34, 0, false)
-	} else {
-		u.mid.RemoveItem(u.details)
-		if u.app.GetFocus() == u.details {
-			u.app.SetFocus(u.tree)
-		}
+	}
+	u.rebuildMid()
+	if !u.showDetails && u.app.GetFocus() == u.details {
+		u.app.SetFocus(u.tree)
 	}
 }
 
@@ -429,7 +456,7 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 				u.history = append(u.history, nm.Message)
 				u.renderMessages()
 			} else if !nm.Message.Out {
-				u.status.SetText("[#f7768e::b]● новое[-:-:-]  " + tview.Escape(statusHints()))
+				u.status.SetText(" [#ffff55::b]● НОВОЕ[-:-:-] " + statusHints())
 			}
 		})
 	}
@@ -628,10 +655,26 @@ func (u *ui) confirm(text string, onYes func()) {
 	u.pages.AddPage("confirm", modal, true, true)
 }
 
+// borlandBar рисует подсказки горячих клавиш в стиле статус-строки Turbo Pascal:
+// клавиша белым жирным, описание тёмным — всё на cyan-фоне виджета.
+func borlandBar(items [][2]string) string {
+	var b strings.Builder
+	for _, it := range items {
+		fmt.Fprintf(&b, " [white::b]%s[#08243a::-] %s ", it[0], it[1])
+	}
+	return b.String()
+}
+
 func statusHints() string {
-	return "[#565f89]Tab — фокус • Ctrl+E — детали • Enter — отправить • Ctrl+C — выход[-]"
+	return borlandBar([][2]string{
+		{"Tab", "Фокус"}, {"^B", "Чаты"}, {"^E", "Детали"},
+		{"Enter", "Отпр"}, {"^C", "Выход"},
+	})
 }
 
 func msgHints() string {
-	return "[#565f89]↑↓ сообщения • c копир • r цитата • d удалить • Space выбор • y копир.выбранные[-]"
+	return borlandBar([][2]string{
+		{"↑↓", "Сообщ"}, {"c", "Копир"}, {"r", "Цитата"},
+		{"d", "Удал"}, {"Spc", "Выбор"}, {"y", "Копир✓"}, {"Tab", "Фокус"},
+	})
 }
