@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -25,9 +26,54 @@ type Dialog struct {
 	Unread  int       `json:"unread"`
 	Date    time.Time `json:"date"`
 	Preview string    `json:"preview"`
+	Ref     PeerRef   `json:"peer"` // сериализуемая ссылка на чат (для кеша)
 
-	// Peer адресует чат для History/Send в TUI (не сериализуется).
+	// Peer адресует чат для History/Send в TUI. Не сериализуется напрямую
+	// (интерфейс); восстанавливается из Ref при чтении из кеша.
 	Peer tg.InputPeerClass `json:"-"`
+}
+
+// PeerRef — компактная сериализуемая ссылка на собеседника/чат: тип, id и
+// access_hash. Нужна, чтобы хранить диалоги в кеше и восстанавливать InputPeer.
+type PeerRef struct {
+	Type       string `json:"type"` // self, user, chat, channel
+	ID         int64  `json:"id"`
+	AccessHash int64  `json:"access_hash"`
+}
+
+// InputPeer восстанавливает InputPeer из ссылки.
+func (r PeerRef) InputPeer() tg.InputPeerClass {
+	switch r.Type {
+	case "self":
+		return &tg.InputPeerSelf{}
+	case "user":
+		return &tg.InputPeerUser{UserID: r.ID, AccessHash: r.AccessHash}
+	case "chat":
+		return &tg.InputPeerChat{ChatID: r.ID}
+	case "channel":
+		return &tg.InputPeerChannel{ChannelID: r.ID, AccessHash: r.AccessHash}
+	}
+	return &tg.InputPeerEmpty{}
+}
+
+// Key — стабильный ключ чата для кеша истории.
+func (r PeerRef) Key() string {
+	return r.Type + ":" + strconv.FormatInt(r.ID, 10)
+}
+
+// peerRefFrom извлекает ссылку из InputPeer.
+func peerRefFrom(p tg.InputPeerClass) PeerRef {
+	switch v := p.(type) {
+	case *tg.InputPeerSelf:
+		return PeerRef{Type: "self"}
+	case *tg.InputPeerUser:
+		return PeerRef{Type: "user", ID: v.UserID, AccessHash: v.AccessHash}
+	case *tg.InputPeerChat:
+		return PeerRef{Type: "chat", ID: v.ChatID}
+	case *tg.InputPeerChannel:
+		return PeerRef{Type: "channel", ID: v.ChannelID, AccessHash: v.AccessHash}
+	}
+	return PeerRef{}
 }
 
 // HistoryMessage — сообщение из истории чата (команда read).

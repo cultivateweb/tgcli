@@ -85,6 +85,7 @@ func DisplayName(u *tg.User) string {
 func dialogFromElem(e dialogs.Elem) Dialog {
 	var d Dialog
 	d.Peer = e.Peer
+	d.Ref = peerRefFrom(e.Peer)
 	if dlg, ok := e.Dialog.(*tg.Dialog); ok {
 		d.Unread = dlg.UnreadCount
 	}

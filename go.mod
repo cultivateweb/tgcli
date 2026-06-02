@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gotd/td v0.144.0
 	github.com/mdp/qrterminal/v3 v3.2.1
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/term v0.43.0
 )
 

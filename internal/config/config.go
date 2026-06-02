@@ -78,6 +78,11 @@ func (c *Config) SessionPath() string {
 	return filepath.Join(filepath.Dir(c.path), "session.json")
 }
 
+// CachePath — путь к локальной БД кеша (диалоги/сообщения), рядом с конфигом.
+func (c *Config) CachePath() string {
+	return filepath.Join(filepath.Dir(c.path), "cache.db")
+}
+
 // DefaultPath возвращает путь к файлу конфигурации по умолчанию.
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()

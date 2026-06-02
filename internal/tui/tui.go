@@ -15,12 +15,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/cultivateweb/tgcli/internal/cache"
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
 // Run запускает TUI поверх открытой сессии (соединение держится всё время).
-func Run(ctx context.Context, sess *telegram.Session) error {
-	p := tea.NewProgram(newModel(ctx, sess), tea.WithAltScreen(), tea.WithContext(ctx))
+// c может быть nil — тогда работаем без кеша.
+func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache) error {
+	p := tea.NewProgram(newModel(ctx, sess, c), tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }
@@ -33,12 +35,14 @@ const (
 )
 
 type model struct {
-	ctx  context.Context
-	sess *telegram.Session
+	ctx   context.Context
+	sess  *telegram.Session
+	cache *cache.Cache
 
-	dialogs []telegram.Dialog
-	sel     int
-	top     int // индекс первого видимого чата в списке (прокрутка)
+	dialogs        []telegram.Dialog
+	dialogsFromNet bool
+	sel            int
+	top            int // индекс первого видимого чата в списке (прокрутка)
 
 	screen  screen
 	history []telegram.HistoryMessage
@@ -50,14 +54,16 @@ type model struct {
 	status        string
 }
 
-// Сообщения от асинхронных команд.
+// Сообщения от асинхронных команд. cached = данные пришли из локального кеша.
 type dialogsMsg struct {
-	d   []telegram.Dialog
-	err error
+	d      []telegram.Dialog
+	err    error
+	cached bool
 }
 type historyMsg struct {
-	h   []telegram.HistoryMessage
-	err error
+	h      []telegram.HistoryMessage
+	err    error
+	cached bool
 }
 type sentMsg struct{ err error }
 
@@ -68,13 +74,14 @@ var (
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
-func newModel(ctx context.Context, sess *telegram.Session) model {
+func newModel(ctx context.Context, sess *telegram.Session, c *cache.Cache) model {
 	ti := textinput.New()
 	ti.Placeholder = "Сообщение…"
 	ti.CharLimit = 4096
 	return model{
 		ctx:    ctx,
 		sess:   sess,
+		cache:  c,
 		input:  ti,
 		screen: listScreen,
 		status: "Загрузка диалогов…",
@@ -82,20 +89,53 @@ func newModel(ctx context.Context, sess *telegram.Session) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return m.loadDialogs()
+	// Сначала кеш (мгновенно), затем сеть (обновит).
+	return tea.Batch(m.loadDialogsCache(), m.loadDialogsNet())
 }
 
-func (m model) loadDialogs() tea.Cmd {
+func (m model) loadDialogsCache() tea.Cmd {
 	return func() tea.Msg {
-		d, err := m.sess.Dialogs(m.ctx, 100, false)
-		return dialogsMsg{d, err}
+		if m.cache == nil {
+			return nil
+		}
+		d, err := m.cache.Dialogs()
+		if err != nil || len(d) == 0 {
+			return nil
+		}
+		return dialogsMsg{d: d, cached: true}
 	}
 }
 
-func (m model) loadHistory(d telegram.Dialog) tea.Cmd {
+func (m model) loadDialogsNet() tea.Cmd {
+	return func() tea.Msg {
+		d, err := m.sess.Dialogs(m.ctx, 100, false)
+		if err == nil && m.cache != nil {
+			_ = m.cache.SaveDialogs(d)
+		}
+		return dialogsMsg{d: d, err: err}
+	}
+}
+
+func (m model) loadHistoryCache(d telegram.Dialog) tea.Cmd {
+	return func() tea.Msg {
+		if m.cache == nil {
+			return nil
+		}
+		h, err := m.cache.History(d.Ref.Key())
+		if err != nil || len(h) == 0 {
+			return nil
+		}
+		return historyMsg{h: h, cached: true}
+	}
+}
+
+func (m model) loadHistoryNet(d telegram.Dialog) tea.Cmd {
 	return func() tea.Msg {
 		h, err := m.sess.HistoryByPeer(m.ctx, d.Peer, 40)
-		return historyMsg{h, err}
+		if err == nil && m.cache != nil {
+			_ = m.cache.SaveHistory(d.Ref.Key(), h)
+		}
+		return historyMsg{h: h, err: err}
 	}
 }
 
@@ -117,21 +157,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dialogsMsg:
+		if msg.cached && m.dialogsFromNet {
+			return m, nil // сеть уже обновила — не затираем кешем
+		}
 		if msg.err != nil {
-			m.status = "Ошибка диалогов: " + msg.err.Error()
+			if len(m.dialogs) == 0 {
+				m.status = "Ошибка диалогов: " + msg.err.Error()
+			}
 			return m, nil
 		}
 		m.dialogs = msg.d
-		m.status = listStatus(len(m.dialogs))
+		if !msg.cached {
+			m.dialogsFromNet = true
+		}
+		m.status = listStatus(len(m.dialogs), msg.cached)
 		return m, nil
 
 	case historyMsg:
-		m.loading = false
+		if msg.cached && !m.loading {
+			return m, nil // сеть уже обновила — не затираем кешем
+		}
 		if msg.err != nil {
+			m.loading = false
 			m.status = "Ошибка истории: " + msg.err.Error()
 			return m, nil
 		}
 		m.history = msg.h
+		if !msg.cached {
+			m.loading = false
+		}
 		m.status = chatStatus()
 		return m, nil
 
@@ -141,7 +195,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.SetValue("")
-		return m, m.loadHistory(m.openTo)
+		return m, m.loadHistoryNet(m.openTo)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -182,7 +236,7 @@ func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.status = "Загрузка истории…"
 		m.input.Focus()
-		return m, tea.Batch(m.loadHistory(cur), textinput.Blink)
+		return m, tea.Batch(m.loadHistoryCache(cur), m.loadHistoryNet(cur), textinput.Blink)
 	}
 	return m, nil
 }
@@ -193,7 +247,7 @@ func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = listScreen
 		m.input.Blur()
 		m.input.SetValue("")
-		m.status = listStatus(len(m.dialogs))
+		m.status = listStatus(len(m.dialogs), false)
 		return m, nil
 	case "enter":
 		text := strings.TrimSpace(m.input.Value())
@@ -215,8 +269,12 @@ func (m model) current() (telegram.Dialog, bool) {
 	return telegram.Dialog{}, false
 }
 
-func listStatus(n int) string {
-	return fmt.Sprintf("Диалогов: %d  •  ↑↓ — выбор, Enter — открыть, q — выход", n)
+func listStatus(n int, cached bool) string {
+	s := fmt.Sprintf("Диалогов: %d  •  ↑↓ — выбор, Enter — открыть, q — выход", n)
+	if cached {
+		s += "  (кеш)"
+	}
+	return s
 }
 
 func chatStatus() string {
