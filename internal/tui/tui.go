@@ -55,13 +55,12 @@ type historyMsg struct {
 type sentMsg struct{ err error }
 
 var (
-	listBox   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	chatBox   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	inputBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	selStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
-	outStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	dimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	nameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
+	listBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
+	chatBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
+	inputBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
+	selStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
+	outStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 func newModel(ctx context.Context, sess *telegram.Session) model {
@@ -113,6 +112,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.input.Width = m.width - sidebarWidth(m.width) - 5
+		if m.input.Width < 4 {
+			m.input.Width = 4
+		}
 		return m, nil
 
 	case dialogsMsg:
@@ -210,21 +213,33 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// sidebarWidth — внешняя ширина левой панели (с рамкой), согласованно
+// используется в View и при расчёте ширины поля ввода.
+func sidebarWidth(total int) int {
+	w := 36
+	if w > total/2 {
+		w = total / 2
+	}
+	if w < 14 {
+		w = 14
+	}
+	return w
+}
+
 func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Загрузка…"
+	if m.width < 28 || m.height < 8 {
+		return "Окно слишком маленькое — увеличьте терминал."
 	}
 
-	sidebarOuter := 36
-	if sidebarOuter > m.width/2 {
-		sidebarOuter = m.width / 2
-	}
+	sidebarOuter := sidebarWidth(m.width)
 	mainOuter := m.width - sidebarOuter
 	bodyH := m.height - 1 // строка статуса снизу
+	chatH := bodyH - 3    // поле ввода занимает 3 строки (рамка + строка)
+	if chatH < 3 {
+		chatH = 3
+	}
 
-	inputOuter := 3 // рамка + строка
-	chatH := bodyH - inputOuter
-
+	// Внутренние размеры = внешние минус рамка (по 1 с каждой стороны).
 	sidebar := m.renderList(sidebarOuter-2, bodyH-2)
 	chat := m.renderChat(mainOuter-2, chatH-2)
 	input := m.renderInput(mainOuter - 2)
@@ -248,7 +263,7 @@ func (m model) renderList(w, h int) string {
 		}
 		line := mark + truncate(d.Title, w-2)
 		if i == m.sel {
-			line = selStyle.Render(padRight(line, w))
+			line = selStyle.Width(w).Render(line)
 		}
 		lines = append(lines, line)
 	}
@@ -266,13 +281,16 @@ func (m model) renderChat(w, h int) string {
 		if text == "" {
 			text = "[вложение]"
 		}
-		var head string
+		// Сначала собираем и обрезаем чистый текст, и только потом красим —
+		// иначе truncate режет по ANSI-кодам и ломает вывод.
+		var line string
 		if msg.Out {
-			head = outStyle.Render("→ ")
+			line = truncate("→ "+text, w)
+			line = outStyle.Render(line)
 		} else {
-			head = nameStyle.Render(truncate(msg.Author, 18) + ": ")
+			line = truncate(truncate(msg.Author, 18)+": "+text, w)
 		}
-		lines = append(lines, truncate(head+text, w))
+		lines = append(lines, line)
 	}
 	if len(lines) > h {
 		lines = lines[len(lines)-h:]
@@ -288,26 +306,18 @@ func (m model) renderInput(w int) string {
 	return style.Render(m.input.View())
 }
 
-// truncate обрезает строку до n рун, добавляя многоточие.
+// truncate обрезает строку до n колонок по визуальной ширине (учитывая
+// двухклеточные эмодзи и широкие символы), добавляя многоточие.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= n {
+	if lipgloss.Width(s) <= n {
 		return s
 	}
-	if n == 1 {
-		return "…"
-	}
-	return string(r[:n-1]) + "…"
-}
-
-// padRight дополняет строку пробелами до n рун (для подсветки во всю ширину).
-func padRight(s string, n int) string {
 	r := []rune(s)
-	if len(r) >= n {
-		return s
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > n {
+		r = r[:len(r)-1]
 	}
-	return s + strings.Repeat(" ", n-len(r))
+	return string(r) + "…"
 }
