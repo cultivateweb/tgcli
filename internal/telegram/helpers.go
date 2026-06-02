@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/peer"
@@ -90,6 +91,7 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 		d.Unread = dlg.UnreadCount
 	}
 	d.Title, d.Kind = peerTitleKind(e.Peer, e.Entities)
+	d.Title = sanitize(d.Title)
 	if msg, ok := e.Last.(*tg.Message); ok {
 		d.Date = time.Unix(int64(msg.Date), 0)
 		d.Preview = oneLine(msg.Message)
@@ -107,8 +109,8 @@ func historyFromElem(e messages.Elem) HistoryMessage {
 	hm.ID = int64(msg.ID)
 	hm.Date = time.Unix(int64(msg.Date), 0)
 	hm.Out = msg.Out
-	hm.Text = msg.Message
-	hm.Author = messageAuthor(msg, e.Entities, e.Peer)
+	hm.Text = sanitize(msg.Message)
+	hm.Author = sanitize(messageAuthor(msg, e.Entities, e.Peer))
 	return hm
 }
 
@@ -159,13 +161,37 @@ func messageAuthor(m *tg.Message, ent peer.Entities, p tg.InputPeerClass) string
 	return title
 }
 
-// oneLine схлопывает текст в одну строку и обрезает для превью.
+// oneLine схлопывает текст в одну строку, чистит и обрезает для превью.
 func oneLine(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	s = sanitize(strings.ReplaceAll(s, "\n", " "))
 	if r := []rune(s); len(r) > 60 {
 		return string(r[:57]) + "…"
 	}
 	return s
+}
+
+// sanitize удаляет невидимые и управляющие символы, из-за которых ширина строки
+// в TUI считается не так, как её рисует терминал (перекос рамок): zero-width,
+// bidi-метки, вариативные селекторы, управляющие символы.
+func sanitize(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteRune(' ')
+		case unicode.IsControl(r):
+			// управляющие — пропускаем
+		case r == 0xFEFF || r == 0x2060: // BOM, word-joiner
+		case r >= 0x200B && r <= 0x200F: // zero-width, LRM, RLM
+		case r >= 0x202A && r <= 0x202E: // bidi embedding/override
+		case r >= 0x2066 && r <= 0x2069: // bidi isolates
+		case r >= 0xFE00 && r <= 0xFE0F: // вариативные селекторы
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // newMessageFrom преобразует сообщение из обновления в NewMessage для подписчиков.
@@ -178,13 +204,12 @@ func newMessageFrom(msg tg.MessageClass, ent tg.Entities) (NewMessage, bool) {
 	if key == "" {
 		return NewMessage{}, false
 	}
-	text := m.Message
 	hm := HistoryMessage{
 		ID:     int64(m.ID),
 		Date:   time.Unix(int64(m.Date), 0),
 		Out:    m.Out,
-		Text:   text,
-		Author: liveAuthor(m, ent),
+		Text:   sanitize(m.Message),
+		Author: sanitize(liveAuthor(m, ent)),
 	}
 	return NewMessage{PeerKey: key, Message: hm}, true
 }

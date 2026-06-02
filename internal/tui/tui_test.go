@@ -10,6 +10,32 @@ import (
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
+func benchModel() model {
+	m := newModel(context.Background(), nil, nil, "v1.0")
+	m.width, m.height = 120, 40
+	m.loading = false
+	m.resizeInput()
+	for i := 0; i < 100; i++ {
+		m.dialogs = append(m.dialogs, telegram.Dialog{
+			Title: "Чат номер " + strings.Repeat("х", i%20), Kind: "user",
+			Ref: telegram.PeerRef{Type: "user", ID: int64(i)},
+		})
+	}
+	for i := 0; i < 50; i++ {
+		m.history = append(m.history, telegram.HistoryMessage{Author: "Кто-то", Text: "сообщение текст текст"})
+	}
+	return m
+}
+
+// BenchmarkView измеряет стоимость одной перерисовки интерфейса.
+func BenchmarkView(b *testing.B) {
+	m := benchModel()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = m.View()
+	}
+}
+
 // TestViewFits проверяет, что View не переполняет терминал: число строк равно
 // высоте, и ни одна строка не шире ширины. Переполнение = «глюки» alt-screen.
 func TestViewFits(t *testing.T) {
