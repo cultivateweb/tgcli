@@ -103,7 +103,7 @@ var (
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89"))
 	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1a1b26")).Background(accent)
 	outStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ece6a"))
-	flashStyle = lipgloss.NewStyle().Bold(true).Blink(true).Foreground(lipgloss.Color("#f7768e"))
+	flashStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f7768e"))
 
 	kindColor = map[string]lipgloss.Color{
 		"self":    lipgloss.Color("#7dcfff"), // голубой — Избранное
@@ -275,7 +275,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) resizeInput() {
-	cw := m.centerWidth() - 2 // минус рамка
+	_, centerW, _ := m.columns()
+	cw := centerW - 2 // минус рамка
 	if cw < 4 {
 		cw = 4
 	}
@@ -283,18 +284,33 @@ func (m *model) resizeInput() {
 	m.input.SetHeight(inputBoxH - 2)
 }
 
-func (m model) centerWidth() int {
-	w := m.width
+// columns вычисляет ВНЕШНИЕ ширины трёх колонок с учётом видимости панелей и
+// доступной ширины. Если места не хватает, панели убираются (сначала правая,
+// потом левая), чтобы сумма ровно равнялась ширине терминала и ничего не
+// переполняло экран.
+func (m model) columns() (leftW, centerW, rightW int) {
+	const minCenter = 24
 	if m.showLeft {
-		w -= leftPanelW
+		leftW = leftPanelW
 	}
 	if m.showRight {
-		w -= rightPanelW
+		rightW = rightPanelW
 	}
-	if w < 10 {
-		w = 10
+	for leftW+rightW+minCenter > m.width {
+		switch {
+		case rightW > 0:
+			rightW = 0
+		case leftW > 0:
+			leftW = 0
+		default:
+			leftW, rightW = 0, 0
+		}
+		if leftW == 0 && rightW == 0 {
+			break
+		}
 	}
-	return w
+	centerW = m.width - leftW - rightW
+	return leftW, centerW, rightW
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -421,13 +437,14 @@ func (m model) View() string {
 
 	header := m.renderHeader()
 
+	leftW, centerW, rightW := m.columns()
 	var cols []string
-	if m.showLeft {
-		cols = append(cols, m.renderChats(leftPanelW-2, midH-2))
+	if leftW > 0 {
+		cols = append(cols, m.renderChats(leftW-2, midH-2))
 	}
-	cols = append(cols, m.renderCenter(m.centerWidth(), midH))
-	if m.showRight {
-		cols = append(cols, m.renderDetails(rightPanelW-2, midH-2))
+	cols = append(cols, m.renderCenter(centerW, midH))
+	if rightW > 0 {
+		cols = append(cols, m.renderDetails(rightW-2, midH-2))
 	}
 	mid := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
