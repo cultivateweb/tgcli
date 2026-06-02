@@ -1,5 +1,9 @@
-// Package tui реализует интерактивный интерфейс tgcli на bubbletea:
-// слева список диалогов, справа переписка, снизу поле ввода.
+// Package tui реализует лёгкий интерактивный интерфейс tgcli на bubbletea.
+//
+// Два экрана: список чатов и открытый чат. История грузится только при входе
+// в чат (Enter), а не при перемещении по списку — так интерфейс остаётся
+// лёгким. Рисуем плоскими строками (без рамок и панелей), чтобы избежать
+// проблем с раскладкой: каждая строка обрезается по ширине терминала.
 package tui
 
 import (
@@ -21,11 +25,11 @@ func Run(ctx context.Context, sess *telegram.Session) error {
 	return err
 }
 
-type focusArea int
+type screen int
 
 const (
-	focusList focusArea = iota
-	focusInput
+	listScreen screen = iota
+	chatScreen
 )
 
 type model struct {
@@ -34,10 +38,13 @@ type model struct {
 
 	dialogs []telegram.Dialog
 	sel     int
-	history []telegram.HistoryMessage
+	top     int // индекс первого видимого чата в списке (прокрутка)
 
-	input textinput.Model
-	focus focusArea
+	screen  screen
+	history []telegram.HistoryMessage
+	loading bool
+	openTo  telegram.Dialog
+	input   textinput.Model
 
 	width, height int
 	status        string
@@ -55,23 +62,21 @@ type historyMsg struct {
 type sentMsg struct{ err error }
 
 var (
-	listBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
-	chatBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
-	inputBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder())
-	selStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
-	outStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	outStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 func newModel(ctx context.Context, sess *telegram.Session) model {
 	ti := textinput.New()
-	ti.Placeholder = "Сообщение…  (Enter — отправить, Esc — к списку)"
+	ti.Placeholder = "Сообщение…"
 	ti.CharLimit = 4096
 	return model{
 		ctx:    ctx,
 		sess:   sess,
 		input:  ti,
-		focus:  focusList,
+		screen: listScreen,
 		status: "Загрузка диалогов…",
 	}
 }
@@ -82,7 +87,7 @@ func (m model) Init() tea.Cmd {
 
 func (m model) loadDialogs() tea.Cmd {
 	return func() tea.Msg {
-		d, err := m.sess.Dialogs(m.ctx, 50, false)
+		d, err := m.sess.Dialogs(m.ctx, 100, false)
 		return dialogsMsg{d, err}
 	}
 }
@@ -101,18 +106,11 @@ func (m model) send(d telegram.Dialog, text string) tea.Cmd {
 	}
 }
 
-func (m model) current() (telegram.Dialog, bool) {
-	if m.sel >= 0 && m.sel < len(m.dialogs) {
-		return m.dialogs[m.sel], true
-	}
-	return telegram.Dialog{}, false
-}
-
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = m.width - sidebarWidth(m.width) - 5
+		m.input.Width = m.width - 4
 		if m.input.Width < 4 {
 			m.input.Width = 4
 		}
@@ -124,19 +122,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dialogs = msg.d
-		m.status = fmt.Sprintf("Диалогов: %d  •  ↑↓ выбор, Enter — ввод, q — выход", len(m.dialogs))
-		if len(m.dialogs) > 0 {
-			m.sel = 0
-			return m, m.loadHistory(m.dialogs[0])
-		}
+		m.status = listStatus(len(m.dialogs))
 		return m, nil
 
 	case historyMsg:
+		m.loading = false
 		if msg.err != nil {
 			m.status = "Ошибка истории: " + msg.err.Error()
 			return m, nil
 		}
 		m.history = msg.h
+		m.status = chatStatus()
 		return m, nil
 
 	case sentMsg:
@@ -145,11 +141,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.SetValue("")
-		m.status = "Отправлено."
-		if cur, ok := m.current(); ok {
-			return m, m.loadHistory(cur)
-		}
-		return m, nil
+		return m, m.loadHistory(m.openTo)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -161,153 +153,181 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
-
-	if m.focus == focusInput {
-		switch msg.String() {
-		case "esc":
-			m.focus = focusList
-			m.input.Blur()
-			return m, nil
-		case "enter":
-			text := strings.TrimSpace(m.input.Value())
-			if text == "" {
-				return m, nil
-			}
-			cur, ok := m.current()
-			if !ok {
-				return m, nil
-			}
-			m.status = "Отправка…"
-			return m, m.send(cur, text)
-		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+	if m.screen == chatScreen {
+		return m.handleChatKey(msg)
 	}
+	return m.handleListKey(msg)
+}
 
-	// Фокус на списке.
+func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
 	case "up", "k":
 		if m.sel > 0 {
 			m.sel--
-			if cur, ok := m.current(); ok {
-				return m, m.loadHistory(cur)
-			}
 		}
-		return m, nil
 	case "down", "j":
 		if m.sel < len(m.dialogs)-1 {
 			m.sel++
-			if cur, ok := m.current(); ok {
-				return m, m.loadHistory(cur)
-			}
 		}
-		return m, nil
-	case "enter", "tab", "i":
-		m.focus = focusInput
+	case "enter":
+		cur, ok := m.current()
+		if !ok {
+			return m, nil
+		}
+		m.screen = chatScreen
+		m.openTo = cur
+		m.history = nil
+		m.loading = true
+		m.status = "Загрузка истории…"
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, tea.Batch(m.loadHistory(cur), textinput.Blink)
 	}
 	return m, nil
 }
 
-// sidebarWidth — внешняя ширина левой панели (с рамкой), согласованно
-// используется в View и при расчёте ширины поля ввода.
-func sidebarWidth(total int) int {
-	w := 36
-	if w > total/2 {
-		w = total / 2
+func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.screen = listScreen
+		m.input.Blur()
+		m.input.SetValue("")
+		m.status = listStatus(len(m.dialogs))
+		return m, nil
+	case "enter":
+		text := strings.TrimSpace(m.input.Value())
+		if text == "" {
+			return m, nil
+		}
+		m.status = "Отправка…"
+		return m, m.send(m.openTo, text)
 	}
-	if w < 14 {
-		w = 14
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m model) current() (telegram.Dialog, bool) {
+	if m.sel >= 0 && m.sel < len(m.dialogs) {
+		return m.dialogs[m.sel], true
 	}
-	return w
+	return telegram.Dialog{}, false
+}
+
+func listStatus(n int) string {
+	return fmt.Sprintf("Диалогов: %d  •  ↑↓ — выбор, Enter — открыть, q — выход", n)
+}
+
+func chatStatus() string {
+	return "Enter — отправить, Esc — назад к списку, Ctrl+C — выход"
 }
 
 func (m model) View() string {
-	if m.width < 28 || m.height < 8 {
-		return "Окно слишком маленькое — увеличьте терминал."
+	if m.width < 10 || m.height < 4 {
+		return "Окно слишком маленькое."
 	}
-
-	sidebarOuter := sidebarWidth(m.width)
-	mainOuter := m.width - sidebarOuter
-	bodyH := m.height - 1 // строка статуса снизу
-	chatH := bodyH - 3    // поле ввода занимает 3 строки (рамка + строка)
-	if chatH < 3 {
-		chatH = 3
+	if m.screen == chatScreen {
+		return m.viewChat()
 	}
-
-	// Внутренние размеры = внешние минус рамка (по 1 с каждой стороны).
-	sidebar := m.renderList(sidebarOuter-2, bodyH-2)
-	chat := m.renderChat(mainOuter-2, chatH-2)
-	input := m.renderInput(mainOuter - 2)
-	right := lipgloss.JoinVertical(lipgloss.Left, chat, input)
-	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, right)
-
-	return lipgloss.JoinVertical(lipgloss.Left, row, dimStyle.Render(truncate(m.status, m.width)))
+	return m.viewList()
 }
 
-func (m model) renderList(w, h int) string {
-	var lines []string
-	start := 0
-	if len(m.dialogs) > h && m.sel >= h {
-		start = m.sel - h + 1
+func (m *model) ensureVisible(rows int) {
+	// Держим выбранный чат в видимом окне [top, top+rows).
+	if m.sel < m.top {
+		m.top = m.sel
 	}
-	for i := start; i < len(m.dialogs) && i < start+h; i++ {
+	if m.sel >= m.top+rows {
+		m.top = m.sel - rows + 1
+	}
+	if m.top < 0 {
+		m.top = 0
+	}
+}
+
+func (m model) viewList() string {
+	rows := m.height - 2 // заголовок + строка статуса
+	if rows < 1 {
+		rows = 1
+	}
+	m.ensureVisible(rows)
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(truncate("tgcli — чаты", m.width)))
+	b.WriteByte('\n')
+
+	for i := m.top; i < len(m.dialogs) && i < m.top+rows; i++ {
 		d := m.dialogs[i]
-		mark := "  "
-		if d.Unread > 0 {
-			mark = "● "
-		}
-		line := mark + truncate(d.Title, w-2)
+		cursor := "  "
 		if i == m.sel {
-			line = selStyle.Width(w).Render(line)
+			cursor = "▌ "
 		}
-		lines = append(lines, line)
+		mark := ""
+		if d.Unread > 0 {
+			mark = fmt.Sprintf("(%d) ", d.Unread)
+		}
+		line := truncate(cursor+mark+d.Title, m.width)
+		if i == m.sel {
+			line = selStyle.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
 	}
-	style := listBox.Width(w).Height(h)
-	if m.focus == focusList {
-		style = style.BorderForeground(lipgloss.Color("6"))
+	// Дополняем до нижней строки, чтобы статус был внизу.
+	shown := len(m.dialogs) - m.top
+	if shown > rows {
+		shown = rows
 	}
-	return style.Render(strings.Join(lines, "\n"))
+	for i := shown; i < rows; i++ {
+		b.WriteByte('\n')
+	}
+	b.WriteString(dimStyle.Render(truncate(m.status, m.width)))
+	return b.String()
 }
 
-func (m model) renderChat(w, h int) string {
+func (m model) viewChat() string {
+	bodyH := m.height - 3 // заголовок + поле ввода + статус
+	if bodyH < 1 {
+		bodyH = 1
+	}
+
 	var lines []string
-	for _, msg := range m.history {
-		text := strings.ReplaceAll(msg.Text, "\n", " ")
-		if text == "" {
-			text = "[вложение]"
+	if m.loading {
+		lines = append(lines, dimStyle.Render("Загрузка…"))
+	} else {
+		for _, msg := range m.history {
+			text := strings.ReplaceAll(msg.Text, "\n", " ")
+			if text == "" {
+				text = "[вложение]"
+			}
+			if msg.Out {
+				lines = append(lines, outStyle.Render(truncate("→ "+text, m.width)))
+			} else {
+				lines = append(lines, truncate(truncate(msg.Author, 18)+": "+text, m.width))
+			}
 		}
-		// Сначала собираем и обрезаем чистый текст, и только потом красим —
-		// иначе truncate режет по ANSI-кодам и ломает вывод.
-		var line string
-		if msg.Out {
-			line = truncate("→ "+text, w)
-			line = outStyle.Render(line)
-		} else {
-			line = truncate(truncate(msg.Author, 18)+": "+text, w)
-		}
-		lines = append(lines, line)
 	}
-	if len(lines) > h {
-		lines = lines[len(lines)-h:]
+	if len(lines) > bodyH {
+		lines = lines[len(lines)-bodyH:]
 	}
-	return chatBox.Width(w).Height(h).Render(strings.Join(lines, "\n"))
-}
 
-func (m model) renderInput(w int) string {
-	style := inputBox.Width(w)
-	if m.focus == focusInput {
-		style = style.BorderForeground(lipgloss.Color("6"))
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(truncate("← "+m.openTo.Title, m.width)))
+	b.WriteByte('\n')
+	b.WriteString(strings.Join(lines, "\n"))
+	for i := len(lines); i < bodyH; i++ {
+		b.WriteByte('\n')
 	}
-	return style.Render(m.input.View())
+	b.WriteByte('\n')
+	b.WriteString(truncate(m.input.View(), m.width))
+	b.WriteByte('\n')
+	b.WriteString(dimStyle.Render(truncate(m.status, m.width)))
+	return b.String()
 }
 
 // truncate обрезает строку до n колонок по визуальной ширине (учитывая
-// двухклеточные эмодзи и широкие символы), добавляя многоточие.
+// двухклеточные эмодзи), добавляя многоточие.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
