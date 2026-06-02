@@ -78,12 +78,13 @@ type ui struct {
 // Run строит и запускает интерфейс. c и updates могут быть nil.
 func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage, version string) error {
 	roundBorders()
+	applyTheme()
 	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
 		app: tview.NewApplication(), selected: map[int]bool{}}
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
 
-	saved := telegram.Dialog{Title: "Saved Messages", Kind: "user", Ref: telegram.PeerRef{Type: "self"}}
+	saved := telegram.Dialog{Title: "Saved Messages", Kind: "user", CanSend: true, Ref: telegram.PeerRef{Type: "self"}}
 	saved.Peer = saved.Ref.InputPeer()
 	u.openChat(saved)
 
@@ -101,6 +102,21 @@ func roundBorders() {
 	tview.Borders.TopRight = '╮'
 	tview.Borders.BottomLeft = '╰'
 	tview.Borders.BottomRight = '╯'
+}
+
+// applyTheme задаёт палитру в стиле Telegram: приглушённый сине-небесный фон
+// вместо чёрного, голубые акценты. Должна вызываться до создания виджетов.
+func applyTheme() {
+	hex := func(s string) tcell.Color { return tcell.GetColor(s) }
+	tview.Styles.PrimitiveBackgroundColor = hex("#17212b") // основной фон (тёмно-синий)
+	tview.Styles.ContrastBackgroundColor = hex("#2b5278")  // выделение (синий Telegram)
+	tview.Styles.MoreContrastBackgroundColor = hex("#3a6a99")
+	tview.Styles.BorderColor = hex("#36506b")
+	tview.Styles.TitleColor = hex("#6ab3f3")
+	tview.Styles.PrimaryTextColor = hex("#c5d0db")
+	tview.Styles.SecondaryTextColor = hex("#6ab3f3")
+	tview.Styles.TertiaryTextColor = hex("#7f91a4")
+	tview.Styles.InverseTextColor = hex("#17212b")
 }
 
 func (u *ui) build() {
@@ -164,7 +180,7 @@ func (u *ui) build() {
 	u.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt == 0 {
 			text := strings.TrimSpace(u.input.GetText())
-			if text != "" && u.open != nil {
+			if text != "" && u.open != nil && u.open.CanSend {
 				go u.sendMessage(*u.open, text)
 			}
 			return nil
@@ -191,6 +207,13 @@ func (u *ui) build() {
 
 	u.status = tview.NewTextView().SetDynamicColors(true)
 	u.status.SetText(statusHints())
+
+	// Псевдо-градиент: панели слева-направо чуть светлеют — даёт ощущение
+	// диагонали тёмно→светло без посимвольной отрисовки фона.
+	u.tree.SetBackgroundColor(hex("#17212b"))
+	u.messages.SetBackgroundColor(hex("#1a2533"))
+	u.input.SetBackgroundColor(hex("#1d2a3a"))
+	u.details.SetBackgroundColor(hex("#20303f"))
 
 	// Заголовок окна терминала отражает открытый чат.
 	u.app.SetBeforeDrawFunc(func(s tcell.Screen) bool {
@@ -240,7 +263,10 @@ func (u *ui) root() *tview.Flex {
 // ── Фокус и панели ─────────────────────────────────────────────────────────
 
 func (u *ui) cycleFocus() {
-	order := []tview.Primitive{u.tree, u.messages, u.input}
+	order := []tview.Primitive{u.tree, u.messages}
+	if u.open == nil || u.open.CanSend {
+		order = append(order, u.input)
+	}
 	if u.showDetails {
 		order = append(order, u.details)
 	}
@@ -325,6 +351,12 @@ func (u *ui) openChat(d telegram.Dialog) {
 	u.history = nil
 	u.msgSel = -1
 	u.selected = map[int]bool{}
+	u.input.SetDisabled(!dd.CanSend)
+	if dd.CanSend {
+		u.input.SetPlaceholder("Сообщение…  (Enter — отправить, Alt+Enter — перенос строки)")
+	} else {
+		u.input.SetPlaceholder("Только чтение — нет прав на отправку в этом чате")
+	}
 	u.messages.SetTitle(" " + tview.Escape(dd.Title) + " ")
 	u.messages.SetText("[#565f89]Загрузка истории…[-]")
 	if u.showDetails {

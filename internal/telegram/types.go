@@ -26,7 +26,8 @@ type Dialog struct {
 	Unread  int       `json:"unread"`
 	Date    time.Time `json:"date"`
 	Preview string    `json:"preview"`
-	Ref     PeerRef   `json:"peer"` // сериализуемая ссылка на чат (для кеша)
+	CanSend bool      `json:"can_send"` // можно ли писать в этот чат
+	Ref     PeerRef   `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
 
 	// Peer адресует чат для History/Send в TUI. Не сериализуется напрямую
 	// (интерфейс); восстанавливается из Ref при чтении из кеша.

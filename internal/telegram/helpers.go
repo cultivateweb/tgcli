@@ -92,6 +92,7 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	}
 	d.Title, d.Kind = peerTitleKind(e.Peer, e.Entities)
 	d.Title = sanitize(d.Title)
+	d.CanSend = canSend(e.Peer, e.Entities)
 	if msg, ok := e.Last.(*tg.Message); ok {
 		d.Date = time.Unix(int64(msg.Date), 0)
 		d.Preview = oneLine(msg.Message)
@@ -112,6 +113,34 @@ func historyFromElem(e messages.Elem) HistoryMessage {
 	hm.Text = sanitize(msg.Message)
 	hm.Author = sanitize(messageAuthor(msg, e.Entities, e.Peer))
 	return hm
+}
+
+// canSend определяет, может ли пользователь писать в чат. Для broadcast-каналов
+// писать может только владелец или админ с правом постинга; для супергрупп —
+// если отправка не запрещена по умолчанию. Личка, боты, обычные группы и
+// Избранное — всегда можно. При нехватке данных разрешаем (не блокируем зря).
+func canSend(p tg.InputPeerClass, ent peer.Entities) bool {
+	v, ok := p.(*tg.InputPeerChannel)
+	if !ok {
+		return true
+	}
+	ch, ok := ent.Channel(v.ChannelID)
+	if !ok {
+		return true
+	}
+	if ch.Creator {
+		return true
+	}
+	if ch.Broadcast {
+		if r, ok := ch.GetAdminRights(); ok {
+			return r.PostMessages
+		}
+		return false
+	}
+	if r, ok := ch.GetDefaultBannedRights(); ok && r.SendMessages {
+		return false
+	}
+	return true
 }
 
 // peerTitleKind возвращает отображаемое имя и тип собеседника/чата.
