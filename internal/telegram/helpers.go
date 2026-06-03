@@ -102,6 +102,11 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	}
 	d.CanSend = canSend(e.Peer, e.Entities)
 	d.Mine = isCreator(e.Peer, e.Entities)
+	if v, ok := e.Peer.(*tg.InputPeerChannel); ok {
+		if ch, ok := e.Entities.Channel(v.ChannelID); ok {
+			d.Forum = ch.Forum
+		}
+	}
 	if msg, ok := e.Last.(*tg.Message); ok {
 		d.Date = time.Unix(int64(msg.Date), 0)
 		d.Preview = oneLine(msg.Message)

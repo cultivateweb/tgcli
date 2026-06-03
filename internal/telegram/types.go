@@ -29,7 +29,13 @@ type Dialog struct {
 	Preview string    `json:"preview"`
 	CanSend bool      `json:"can_send"` // можно ли писать в этот чат
 	Mine    bool      `json:"mine"`     // я создатель (для групп/каналов)
+	Forum   bool      `json:"forum"`    // супергруппа-форум (есть темы)
 	Ref     PeerRef   `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
+
+	// TopicID/TopicTitle непусты, когда диалог адресует тему форума, а не сам
+	// чат: история и отправка идут через тред темы.
+	TopicID    int    `json:"-"`
+	TopicTitle string `json:"-"`
 
 	// Peer адресует чат для History/Send в TUI. Не сериализуется напрямую
 	// (интерфейс); восстанавливается из Ref при чтении из кеша.

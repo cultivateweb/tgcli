@@ -105,13 +105,16 @@ type ui struct {
 	msgSel    int          // индекс выбранного сообщения
 	msgScroll int          // прокрутка панели сообщений (в логических строках)
 	selected  map[int]bool // мультивыбор сообщений
+
+	forumLoaded map[string]bool // ключи супергрупп-форумов, чьи темы уже загружены
 }
 
 // Run строит и запускает интерфейс. c и updates могут быть nil.
 func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage, version string) error {
 	applyTheme()
 	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
-		app: tview.NewApplication(), selected: map[int]bool{}, menuActive: -1}
+		app: tview.NewApplication(), selected: map[int]bool{},
+		forumLoaded: map[string]bool{}, menuActive: -1}
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
 
@@ -233,12 +236,19 @@ func (u *ui) build() {
 		func() { u.lastPanel = u.tree; u.dismissMenuIfOpen(); u.tree.SetTitle(focusTitle(titleTree)) },
 		func() { u.tree.SetTitle(titleTree) })
 	u.tree.SetSelectedFunc(func(node *tview.TreeNode) {
-		if ref := node.GetReference(); ref != nil {
-			u.openChat(*ref.(*telegram.Dialog))
-			u.app.SetFocus(u.messages) // Enter на чате → панель сообщений
+		ref := node.GetReference()
+		if ref == nil {
+			node.SetExpanded(!node.IsExpanded())
 			return
 		}
-		node.SetExpanded(!node.IsExpanded())
+		d := ref.(*telegram.Dialog)
+		if d.Forum && d.TopicID == 0 { // супергруппа-форум → раскрыть темы
+			u.loadForum(node, *d)
+			node.SetExpanded(!node.IsExpanded())
+			return
+		}
+		u.openChat(*d)
+		u.app.SetFocus(u.messages) // Enter на чате/теме → панель сообщений
 	})
 	// ←/→ — свернуть/развернуть закладку (узел дерева). Esc — выход из дерева
 	// не предусмотрен (это крайняя левая панель). ↑↓ оставляем дереву.
@@ -246,8 +256,17 @@ func (u *ui) build() {
 		cur := u.tree.GetCurrentNode()
 		switch ev.Key() {
 		case tcell.KeyRight:
-			if cur != nil && len(cur.GetChildren()) > 0 {
-				cur.SetExpanded(true)
+			if cur != nil {
+				if ref := cur.GetReference(); ref != nil {
+					if d := ref.(*telegram.Dialog); d.Forum && d.TopicID == 0 {
+						u.loadForum(cur, *d) // форум → подгрузить темы и раскрыть
+						cur.SetExpanded(true)
+						return nil
+					}
+				}
+				if len(cur.GetChildren()) > 0 {
+					cur.SetExpanded(true)
+				}
 			}
 			return nil
 		case tcell.KeyLeft:
@@ -646,7 +665,52 @@ func (u *ui) treeParent(target *tview.TreeNode) *tview.TreeNode {
 	return found
 }
 
+// loadForum один раз подгружает темы форум-супергруппы (асинхронно) и заменяет
+// ими заглушку-«…» под её узлом. Закрытые темы помечаются 🔒 и доступны только
+// для чтения.
+func (u *ui) loadForum(node *tview.TreeNode, d telegram.Dialog) {
+	if u.forumLoaded == nil {
+		u.forumLoaded = map[string]bool{}
+	}
+	if u.forumLoaded[d.Ref.Key()] || u.sess == nil {
+		return
+	}
+	u.forumLoaded[d.Ref.Key()] = true
+	col := tcell.GetColor(kindColor["supergroup"])
+	go func() {
+		topics, err := u.sess.ForumTopics(u.ctx, d.Peer, 100)
+		u.app.QueueUpdateDraw(func() {
+			node.ClearChildren()
+			if err != nil {
+				node.AddChild(tview.NewTreeNode("  ошибка: " + tview.Escape(err.Error())).SetSelectable(false))
+				u.forumLoaded[d.Ref.Key()] = false // дать повторить позже
+				return
+			}
+			if len(topics) == 0 {
+				node.AddChild(tview.NewTreeNode("  (нет тем)").SetSelectable(false).
+					SetColor(tcell.GetColor(colorInactive)))
+				return
+			}
+			for _, t := range topics {
+				title := t.Title
+				if t.Closed {
+					title = "🔒 " + title
+				}
+				td := d
+				td.TopicID = t.ID
+				td.TopicTitle = t.Title
+				td.CanSend = d.CanSend && !t.Closed
+				node.AddChild(tview.NewTreeNode(treeLine(title, "", treeAvail(3))).
+					SetReference(&td).SetColor(col))
+			}
+		})
+	}()
+}
+
 func (u *ui) buildTree() {
+	// Узлы пересоздаются — сбрасываем отметки загруженных форумов, иначе заглушка
+	// «…» залипнет (loadForum посчитает темы уже загруженными).
+	u.forumLoaded = map[string]bool{}
 	groups := map[string][]telegram.Dialog{}
 	for _, d := range u.dialogs {
 		groups[groupKey(d)] = append(groups[groupKey(d)], d)
@@ -672,8 +736,14 @@ func (u *ui) buildTree() {
 			if c, ok := kindColor[d.Kind]; ok { // супергруппы — своим цветом
 				chatCol = tcell.GetColor(c)
 			}
-			cat.AddChild(tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
-				SetReference(&d).SetColor(chatCol))
+			node := tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
+				SetReference(&d).SetColor(chatCol)
+			if d.Forum { // форум раскрывается в темы (лениво) — заглушка для стрелки
+				node.SetExpanded(false)
+				node.AddChild(tview.NewTreeNode("  …").SetSelectable(false).
+					SetColor(tcell.GetColor(colorInactive)))
+			}
+			cat.AddChild(node)
 		}
 		root.AddChild(cat)
 	}
@@ -693,7 +763,11 @@ func (u *ui) openChat(d telegram.Dialog) {
 	} else {
 		u.input.SetPlaceholder("Только чтение — нет прав на отправку в этом чате")
 	}
-	u.msgTitle = " " + tview.Escape(dd.Title) + " "
+	if dd.TopicID != 0 {
+		u.msgTitle = " " + tview.Escape(dd.Title) + " / " + tview.Escape(dd.TopicTitle) + " "
+	} else {
+		u.msgTitle = " " + tview.Escape(dd.Title) + " "
+	}
 	u.setTitle(u.messages, u.msgTitle)
 	u.messages.SetText("[#565f89]Загрузка истории…[-]")
 	if u.showDetails {
@@ -701,23 +775,32 @@ func (u *ui) openChat(d telegram.Dialog) {
 	}
 
 	go func() {
-		key := dd.Ref.Key()
-		if u.cache != nil {
-			if h, err := u.cache.History(key); err == nil && len(h) > 0 {
+		// История темы форума загружается тредом ответов; кеш — только для
+		// обычных чатов (тема перезапрашивается всегда).
+		if dd.TopicID == 0 && u.cache != nil {
+			if h, err := u.cache.History(dd.Ref.Key()); err == nil && len(h) > 0 {
 				u.app.QueueUpdateDraw(func() {
-					if u.open != nil && u.open.Ref.Key() == key {
+					if u.sameChat(dd) {
 						u.history = h
 						u.renderMessages()
 					}
 				})
 			}
 		}
-		h, err := u.sess.HistoryByPeer(u.ctx, dd.Peer, 60)
-		if err == nil && u.cache != nil {
-			_ = u.cache.SaveHistory(key, h)
+		var (
+			h   []telegram.HistoryMessage
+			err error
+		)
+		if dd.TopicID != 0 {
+			h, err = u.sess.HistoryByTopic(u.ctx, dd.Peer, dd.TopicID, 60)
+		} else {
+			h, err = u.sess.HistoryByPeer(u.ctx, dd.Peer, 60)
+			if err == nil && u.cache != nil {
+				_ = u.cache.SaveHistory(dd.Ref.Key(), h)
+			}
 		}
 		u.app.QueueUpdateDraw(func() {
-			if u.open == nil || u.open.Ref.Key() != key {
+			if !u.sameChat(dd) {
 				return
 			}
 			if err != nil {
@@ -730,8 +813,18 @@ func (u *ui) openChat(d telegram.Dialog) {
 	}()
 }
 
+// sameChat сообщает, открыт ли сейчас именно этот чат/тема.
+func (u *ui) sameChat(d telegram.Dialog) bool {
+	return u.open != nil && u.open.Ref.Key() == d.Ref.Key() && u.open.TopicID == d.TopicID
+}
+
 func (u *ui) sendMessage(d telegram.Dialog, text string) {
-	_, err := u.sess.SendToPeer(u.ctx, d.Peer, text)
+	var err error
+	if d.TopicID != 0 {
+		_, err = u.sess.SendToTopic(u.ctx, d.Peer, d.TopicID, text)
+	} else {
+		_, err = u.sess.SendToPeer(u.ctx, d.Peer, text)
+	}
 	u.app.QueueUpdateDraw(func() {
 		if err != nil {
 			u.status.SetText("[#f7768e]Ошибка отправки: " + tview.Escape(err.Error()))
@@ -741,20 +834,7 @@ func (u *ui) sendMessage(d telegram.Dialog, text string) {
 		u.status.SetText(statusHints())
 	})
 	if err == nil {
-		go func() {
-			h, herr := u.sess.HistoryByPeer(u.ctx, d.Peer, 60)
-			if herr == nil {
-				if u.cache != nil {
-					_ = u.cache.SaveHistory(d.Ref.Key(), h)
-				}
-				u.app.QueueUpdateDraw(func() {
-					if u.open != nil && u.open.Ref.Key() == d.Ref.Key() {
-						u.history = h
-						u.renderMessages()
-					}
-				})
-			}
-		}()
+		go u.reloadHistory(d)
 	}
 }
 
@@ -762,7 +842,7 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 	for nm := range updates {
 		nm := nm
 		u.app.QueueUpdateDraw(func() {
-			if u.open != nil && nm.PeerKey == u.open.Ref.Key() {
+			if u.open != nil && u.open.TopicID == 0 && nm.PeerKey == u.open.Ref.Key() {
 				u.history = append(u.history, nm.Message)
 				u.renderMessages()
 			} else if !nm.Message.Out {
@@ -1097,15 +1177,23 @@ func (u *ui) deleteMsg() {
 }
 
 func (u *ui) reloadHistory(d telegram.Dialog) {
-	h, err := u.sess.HistoryByPeer(u.ctx, d.Peer, 60)
+	var (
+		h   []telegram.HistoryMessage
+		err error
+	)
+	if d.TopicID != 0 {
+		h, err = u.sess.HistoryByTopic(u.ctx, d.Peer, d.TopicID, 60)
+	} else {
+		h, err = u.sess.HistoryByPeer(u.ctx, d.Peer, 60)
+	}
 	if err != nil {
 		return
 	}
-	if u.cache != nil {
+	if d.TopicID == 0 && u.cache != nil {
 		_ = u.cache.SaveHistory(d.Ref.Key(), h)
 	}
 	u.app.QueueUpdateDraw(func() {
-		if u.open != nil && u.open.Ref.Key() == d.Ref.Key() {
+		if u.sameChat(d) {
 			u.history = h
 			u.renderMessages()
 		}
