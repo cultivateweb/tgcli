@@ -38,13 +38,14 @@ var kindOrder = []struct{ key, label string }{
 // Цвета по типам чатов (выбор пользователя). «Мои» — те же оттенки, что и
 // обычные группы/каналы.
 var kindColor = map[string]string{
-	"self":      "#7dcfff",
-	"user":      "#9ece6a",
-	"bot":       "#e0af68",
-	"group":     "#7aa2f7",
-	"mygroup":   "#7aa2f7",
-	"channel":   "#bb9af7",
-	"mychannel": "#bb9af7",
+	"self":       "#7dcfff",
+	"user":       "#9ece6a",
+	"bot":        "#e0af68",
+	"group":      "#7aa2f7",
+	"supergroup": "#2ac3de", // супергруппы — отдельным цветом среди групп
+	"mygroup":    "#7aa2f7",
+	"channel":    "#bb9af7",
+	"mychannel":  "#bb9af7",
 }
 
 func groupKey(d telegram.Dialog) string {
@@ -54,7 +55,7 @@ func groupKey(d telegram.Dialog) string {
 	switch d.Kind {
 	case "bot":
 		return "bot"
-	case "group":
+	case "group", "supergroup":
 		if d.Mine {
 			return "mygroup"
 		}
@@ -667,8 +668,12 @@ func (u *ui) buildTree() {
 			if d.Unread > 0 {
 				count = fmt.Sprintf("(%d)", d.Unread)
 			}
+			chatCol := col
+			if c, ok := kindColor[d.Kind]; ok { // супергруппы — своим цветом
+				chatCol = tcell.GetColor(c)
+			}
 			cat.AddChild(tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
-				SetReference(&d).SetColor(col))
+				SetReference(&d).SetColor(chatCol))
 		}
 		root.AddChild(cat)
 	}

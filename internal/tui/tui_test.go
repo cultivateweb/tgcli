@@ -16,6 +16,8 @@ func TestGroupKey(t *testing.T) {
 		{telegram.Dialog{Kind: "bot", Ref: telegram.PeerRef{Type: "user"}}, "bot"},
 		{telegram.Dialog{Kind: "group", Ref: telegram.PeerRef{Type: "chat"}}, "group"},
 		{telegram.Dialog{Kind: "group", Mine: true, Ref: telegram.PeerRef{Type: "chat"}}, "mygroup"},
+		{telegram.Dialog{Kind: "supergroup", Ref: telegram.PeerRef{Type: "channel"}}, "group"},
+		{telegram.Dialog{Kind: "supergroup", Mine: true, Ref: telegram.PeerRef{Type: "channel"}}, "mygroup"},
 		{telegram.Dialog{Kind: "channel", Ref: telegram.PeerRef{Type: "channel"}}, "channel"},
 		{telegram.Dialog{Kind: "channel", Mine: true, Ref: telegram.PeerRef{Type: "channel"}}, "mychannel"},
 	}

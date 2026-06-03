@@ -191,7 +191,7 @@ func peerTitleKind(p tg.InputPeerClass, ent peer.Entities) (title, kind string) 
 	case *tg.InputPeerChannel:
 		if ch, ok := ent.Channel(v.ChannelID); ok {
 			if ch.Megagroup {
-				return ch.Title, "group"
+				return ch.Title, "supergroup"
 			}
 			return ch.Title, "channel"
 		}
