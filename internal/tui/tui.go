@@ -101,8 +101,9 @@ type ui struct {
 	showTree    bool
 	showDetails bool
 
-	msgSel   int          // индекс выбранного сообщения
-	selected map[int]bool // мультивыбор сообщений
+	msgSel    int          // индекс выбранного сообщения
+	msgScroll int          // прокрутка панели сообщений (в логических строках)
+	selected  map[int]bool // мультивыбор сообщений
 }
 
 // Run строит и запускает интерфейс. c и updates могут быть nil.
@@ -679,6 +680,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 	u.open = &dd
 	u.history = nil
 	u.msgSel = -1
+	u.msgScroll = 0
 	u.selected = map[int]bool{}
 	u.input.SetDisabled(!dd.CanSend)
 	if dd.CanSend {
@@ -768,57 +770,101 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 // ── Рендер ─────────────────────────────────────────────────────────────────
 
 func (u *ui) renderMessages() {
-	if len(u.history) > 0 && (u.msgSel < 0 || u.msgSel >= len(u.history)) {
+	if len(u.history) == 0 {
+		u.messages.SetText("")
+		return
+	}
+	if u.msgSel < 0 || u.msgSel >= len(u.history) {
 		u.msgSel = len(u.history) - 1
 	}
 	var b strings.Builder
-	for i, msg := range u.history {
-		b.WriteString(`["m` + fmt.Sprint(i) + `"]`) // регион сообщения
-		ts := msg.Date.Format("15:04")
-		if i == u.msgSel {
-			// Выбранное сообщение — без цветовой разметки: подсветка региона
-			// инвертирует символы, и одноцветный текст даёт ровную полосу-курсор
-			// на всех строках сообщения, а не «по словам».
-			if u.selected[i] {
-				b.WriteString("✓ ")
-			}
-			prefix := "→"
-			if !msg.Out {
-				prefix = msg.Author + ":"
-			}
-			fmt.Fprintf(&b, "%s %s %s", ts, tview.Escape(prefix), tview.Escape(msg.Plain()))
-			if msg.Media != nil {
-				if msg.Plain() != "" {
-					b.WriteString("\n         ")
-				}
-				fmt.Fprintf(&b, "📎 %s", tview.Escape(msg.Media.Label()))
-			}
-		} else {
-			if u.selected[i] {
-				b.WriteString("[#e0af68]✓ [-]")
-			}
-			if msg.Out {
-				fmt.Fprintf(&b, "[#565f89]%s[-] [#9ece6a]→[-] ", ts)
-			} else {
-				fmt.Fprintf(&b, "[#565f89]%s[-] [#7dcfff::b]%s:[-:-:-] ", ts, tview.Escape(msg.Author))
-			}
-			body := renderBody(msg)
-			b.WriteString(body)
-			if msg.Media != nil {
-				label := tview.Escape(msg.Media.Label())
-				if body != "" {
-					b.WriteString("\n         ")
-				}
-				fmt.Fprintf(&b, "[#e0af68]📎 %s[-]", label)
-			}
+	// Считаем логические строки, чтобы потом прокрутить к выбранному сообщению
+	// вручную (ScrollTo), а не через ScrollToHighlight: последний недопарсивает
+	// индекс за одну отрисовку — низ панели остаётся пустым.
+	cur, selStart, selEnd := 0, 0, 0
+	for i := range u.history {
+		if i > 0 {
+			b.WriteByte('\n')
+			cur++
 		}
-		b.WriteString(`[""]` + "\n")
+		start := cur
+		content := u.buildMessage(i)
+		b.WriteString(`["m` + fmt.Sprint(i) + `"]`)
+		b.WriteString(content)
+		b.WriteString(`[""]`)
+		cur += strings.Count(content, "\n")
+		if i == u.msgSel {
+			selStart, selEnd = start, cur
+		}
 	}
+	total := cur + 1
 	u.messages.SetText(b.String())
-	if len(u.history) > 0 {
-		u.messages.Highlight("m" + fmt.Sprint(u.msgSel))
-		u.messages.ScrollToHighlight()
+	u.messages.Highlight("m" + fmt.Sprint(u.msgSel))
+
+	_, _, _, vh := u.messages.GetInnerRect()
+	if vh <= 0 {
+		u.messages.ScrollTo(u.msgScroll, 0)
+		return
 	}
+	off := u.msgScroll
+	if selStart < off { // выбранное выше окна — подкрутить вверх
+		off = selStart
+	}
+	if selEnd > off+vh-1 { // выбранное ниже окна — подкрутить вниз
+		off = selEnd - vh + 1
+	}
+	if max := total - vh; off > max {
+		off = max
+	}
+	if off < 0 {
+		off = 0
+	}
+	u.msgScroll = off
+	u.messages.ScrollTo(off, 0)
+}
+
+// buildMessage формирует содержимое одного сообщения (без обёртки региона и без
+// завершающего перевода строки). Выбранное сообщение рисуется одноцветным —
+// тогда инверсия региона даёт ровную полосу-курсор на всех его строках.
+func (u *ui) buildMessage(i int) string {
+	msg := u.history[i]
+	ts := msg.Date.Format("15:04")
+	var b strings.Builder
+	if i == u.msgSel {
+		if u.selected[i] {
+			b.WriteString("✓ ")
+		}
+		prefix := "→"
+		if !msg.Out {
+			prefix = msg.Author + ":"
+		}
+		fmt.Fprintf(&b, "%s %s %s", ts, tview.Escape(prefix), tview.Escape(msg.Plain()))
+		if msg.Media != nil {
+			if msg.Plain() != "" {
+				b.WriteString("\n         ")
+			}
+			fmt.Fprintf(&b, "📎 %s", tview.Escape(msg.Media.Label()))
+		}
+		return b.String()
+	}
+	if u.selected[i] {
+		b.WriteString("[#e0af68]✓ [-]")
+	}
+	if msg.Out {
+		fmt.Fprintf(&b, "[#565f89]%s[-] [#9ece6a]→[-] ", ts)
+	} else {
+		fmt.Fprintf(&b, "[#565f89]%s[-] [#7dcfff::b]%s:[-:-:-] ", ts, tview.Escape(msg.Author))
+	}
+	body := renderBody(msg)
+	b.WriteString(body)
+	if msg.Media != nil {
+		label := tview.Escape(msg.Media.Label())
+		if body != "" {
+			b.WriteString("\n         ")
+		}
+		fmt.Fprintf(&b, "[#e0af68]📎 %s[-]", label)
+	}
+	return b.String()
 }
 
 // renderBody превращает тело сообщения в строку с tview-разметкой: применяет
