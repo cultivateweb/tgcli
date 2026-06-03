@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -27,6 +28,7 @@ type Dialog struct {
 	Date    time.Time `json:"date"`
 	Preview string    `json:"preview"`
 	CanSend bool      `json:"can_send"` // можно ли писать в этот чат
+	Mine    bool      `json:"mine"`     // я создатель (для групп/каналов)
 	Ref     PeerRef   `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
 
 	// Peer адресует чат для History/Send в TUI. Не сериализуется напрямую
@@ -90,5 +92,93 @@ type HistoryMessage struct {
 	Date   time.Time `json:"date"`
 	Author string    `json:"author"`
 	Out    bool      `json:"out"` // исходящее (отправлено мной)
-	Text   string    `json:"text"`
+	Text   string    `json:"text"` // plain-текст (для копирования/цитаты/превью)
+
+	// Spans — текст, разбитый на форматированные сегменты (из entities Telegram).
+	// Пусто, если форматирования нет; тогда для вывода берётся Text.
+	Spans []Span `json:"spans,omitempty"`
+	// Media — описание вложения (фото/файл/видео…), nil если вложения нет.
+	Media *Media `json:"media,omitempty"`
+}
+
+// Plain возвращает текст сообщения без разметки для копирования/цитаты:
+// собирается из Spans (сохраняя переносы строк), иначе берётся Text.
+func (m HistoryMessage) Plain() string {
+	if len(m.Spans) == 0 {
+		return m.Text
+	}
+	var b strings.Builder
+	for _, s := range m.Spans {
+		b.WriteString(s.Text)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// Span — сегмент текста с единым форматированием. Несколько флагов могут
+// сочетаться (например, B && I). URL непуст для ссылок.
+type Span struct {
+	Text string `json:"t"`
+	B    bool   `json:"b,omitempty"` // bold
+	I    bool   `json:"i,omitempty"` // italic
+	U    bool   `json:"u,omitempty"` // underline
+	S    bool   `json:"s,omitempty"` // strikethrough
+	Code bool   `json:"c,omitempty"` // моноширинный (code/pre)
+	URL  string `json:"url,omitempty"`
+}
+
+// Media — описание вложения. Достаточно для отображения; для скачивания
+// сообщение перезапрашивается заново (DownloadMedia), чтобы file_reference был
+// свежим.
+type Media struct {
+	Kind     string `json:"kind"`               // photo, video, audio, voice, gif, sticker, document
+	FileName string `json:"file_name,omitempty"`
+	MIME     string `json:"mime,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+}
+
+// Label — человекочитаемое описание вложения для строки в переписке.
+func (m *Media) Label() string {
+	if m == nil {
+		return ""
+	}
+	name := m.FileName
+	if name == "" {
+		name = mediaKindName(m.Kind)
+	}
+	if m.Size > 0 {
+		return name + " (" + humanSize(m.Size) + ")"
+	}
+	return name
+}
+
+func mediaKindName(kind string) string {
+	switch kind {
+	case "photo":
+		return "фото"
+	case "video":
+		return "видео"
+	case "gif":
+		return "GIF"
+	case "audio":
+		return "аудио"
+	case "voice":
+		return "голосовое"
+	case "sticker":
+		return "стикер"
+	default:
+		return "файл"
+	}
+}
+
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return strconv.FormatInt(n, 10) + " Б"
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return strconv.FormatFloat(float64(n)/float64(div), 'f', 1, 64) + " " + []string{"КБ", "МБ", "ГБ", "ТБ"}[exp]
 }

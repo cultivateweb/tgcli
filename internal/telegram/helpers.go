@@ -92,7 +92,16 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	}
 	d.Title, d.Kind = peerTitleKind(e.Peer, e.Entities)
 	d.Title = sanitize(d.Title)
+	// «Saved Messages» приходит как обычный пользователь (свой же аккаунт) —
+	// узнаём его по флагу Self и относим к Избранному.
+	if v, ok := e.Peer.(*tg.InputPeerUser); ok {
+		if usr, ok := e.Entities.User(v.UserID); ok && usr.Self {
+			d.Kind = "self"
+			d.Title = "Saved Messages"
+		}
+	}
 	d.CanSend = canSend(e.Peer, e.Entities)
+	d.Mine = isCreator(e.Peer, e.Entities)
 	if msg, ok := e.Last.(*tg.Message); ok {
 		d.Date = time.Unix(int64(msg.Date), 0)
 		d.Preview = oneLine(msg.Message)
@@ -111,6 +120,8 @@ func historyFromElem(e messages.Elem) HistoryMessage {
 	hm.Date = time.Unix(int64(msg.Date), 0)
 	hm.Out = msg.Out
 	hm.Text = sanitize(msg.Message)
+	hm.Spans = spansFrom(msg.Message, msg.Entities)
+	hm.Media = mediaFrom(msg)
 	hm.Author = sanitize(messageAuthor(msg, e.Entities, e.Peer))
 	return hm
 }
@@ -141,6 +152,22 @@ func canSend(p tg.InputPeerClass, ent peer.Entities) bool {
 		return false
 	}
 	return true
+}
+
+// isCreator сообщает, является ли пользователь создателем группы/канала.
+// Для лички и ботов понятия владельца нет — возвращает false.
+func isCreator(p tg.InputPeerClass, ent peer.Entities) bool {
+	switch v := p.(type) {
+	case *tg.InputPeerChat:
+		if ch, ok := ent.Chat(v.ChatID); ok {
+			return ch.Creator
+		}
+	case *tg.InputPeerChannel:
+		if ch, ok := ent.Channel(v.ChannelID); ok {
+			return ch.Creator
+		}
+	}
+	return false
 }
 
 // peerTitleKind возвращает отображаемое имя и тип собеседника/чата.
@@ -201,16 +228,37 @@ func oneLine(s string) string {
 
 // sanitize удаляет невидимые и управляющие символы, из-за которых ширина строки
 // в TUI считается не так, как её рисует терминал (перекос рамок): zero-width,
-// bidi-метки, вариативные селекторы, управляющие символы.
+// bidi-метки, вариативные селекторы, управляющие символы. Переносы строк и
+// табуляции схлопываются в пробел, результат обрезается по краям (для имён,
+// превью, однострочного текста).
 func sanitize(s string) string {
+	return strings.TrimSpace(cleanRunes(s, false))
+}
+
+// cleanInline чистит те же невидимые символы, что и sanitize, но сохраняет
+// обычные пробелы и переносы строк и не обрезает края — для сегментов
+// форматированного текста (Span), где важна разметка пробелов и абзацев.
+func cleanInline(s string) string {
+	return cleanRunes(s, true)
+}
+
+// cleanRunes — общий фильтр невидимых/управляющих символов. Если keepBreaks,
+// переносы строк сохраняются (табуляция → пробел), иначе всё схлопывается в пробел.
+func cleanRunes(s string, keepBreaks bool) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
-		case r == '\t' || r == '\n' || r == '\r':
+		case r == '\n':
+			if keepBreaks {
+				b.WriteRune('\n')
+			} else {
+				b.WriteRune(' ')
+			}
+		case r == '\t' || r == '\r':
 			b.WriteRune(' ')
 		case unicode.IsControl(r):
-			// управляющие — пропускаем
+			// прочие управляющие — пропускаем
 		case r == 0xFEFF || r == 0x2060: // BOM, word-joiner
 		case r >= 0x200B && r <= 0x200F: // zero-width, LRM, RLM
 		case r >= 0x202A && r <= 0x202E: // bidi embedding/override
@@ -220,7 +268,7 @@ func sanitize(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
 // newMessageFrom преобразует сообщение из обновления в NewMessage для подписчиков.
@@ -238,6 +286,8 @@ func newMessageFrom(msg tg.MessageClass, ent tg.Entities) (NewMessage, bool) {
 		Date:   time.Unix(int64(m.Date), 0),
 		Out:    m.Out,
 		Text:   sanitize(m.Message),
+		Spans:  spansFrom(m.Message, m.Entities),
+		Media:  mediaFrom(m),
 		Author: sanitize(liveAuthor(m, ent)),
 	}
 	return NewMessage{PeerKey: key, Message: hm}, true

@@ -15,7 +15,9 @@ func TestGroupKey(t *testing.T) {
 		{telegram.Dialog{Kind: "user", Ref: telegram.PeerRef{Type: "user"}}, "user"},
 		{telegram.Dialog{Kind: "bot", Ref: telegram.PeerRef{Type: "user"}}, "bot"},
 		{telegram.Dialog{Kind: "group", Ref: telegram.PeerRef{Type: "chat"}}, "group"},
+		{telegram.Dialog{Kind: "group", Mine: true, Ref: telegram.PeerRef{Type: "chat"}}, "mygroup"},
 		{telegram.Dialog{Kind: "channel", Ref: telegram.PeerRef{Type: "channel"}}, "channel"},
+		{telegram.Dialog{Kind: "channel", Mine: true, Ref: telegram.PeerRef{Type: "channel"}}, "mychannel"},
 	}
 	for _, c := range cases {
 		if got := groupKey(c.d); got != c.want {
