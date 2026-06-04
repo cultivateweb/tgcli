@@ -259,15 +259,18 @@ func cleanInline(s string) string {
 func cleanRunes(s string, keepBreaks bool) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	combining := 0 // подряд идущих комбинирующих знаков (защита от Zalgo)
 	for _, r := range s {
 		switch {
 		case r == '\n':
+			combining = 0
 			if keepBreaks {
 				b.WriteRune('\n')
 			} else {
 				b.WriteRune(' ')
 			}
 		case r == '\t' || r == '\r':
+			combining = 0
 			b.WriteRune(' ')
 		case unicode.IsControl(r):
 			// прочие управляющие — пропускаем
@@ -276,7 +279,15 @@ func cleanRunes(s string, keepBreaks bool) string {
 		case r >= 0x202A && r <= 0x202E: // bidi embedding/override
 		case r >= 0x2066 && r <= 0x2069: // bidi isolates
 		case r >= 0xFE00 && r <= 0xFE0F: // вариативные селекторы
+		case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r):
+			// комбинирующие знаки нулевой ширины: не более 2 на базовый символ —
+			// легитимные диакритики остаются, нагромождение (Zalgo) обрезается.
+			if combining < 2 {
+				b.WriteRune(r)
+				combining++
+			}
 		default:
+			combining = 0
 			b.WriteRune(r)
 		}
 	}
