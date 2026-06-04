@@ -7,6 +7,7 @@ package tui
 
 import (
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
 )
 
@@ -119,11 +120,15 @@ func drawMRow(screen tcell.Screen, x, y, w int, row mrow) {
 	}
 	cx := x
 	for _, gl := range row.glyphs {
-		if cx >= x+w {
+		gw := runewidth.RuneWidth(gl.r)
+		if gw == 0 { // нулевая ширина (комбинирующие/невидимые) — пропускаем
+			continue
+		}
+		if cx+gw > x+w { // широкий символ не влезает у края
 			break
 		}
 		screen.SetContent(cx, y, gl.r, nil, gl.st.Background(row.bg))
-		cx++
+		cx += gw
 	}
 }
 
@@ -135,38 +140,57 @@ func glyphsOf(s string, st tcell.Style) []mglyph {
 	return g
 }
 
-// wrapGlyphs переносит символы по ширине w, предпочитая разрыв по пробелу;
-// '\n' начинает новую строку.
+// rowWidth — ширина строки глифов в клетках терминала (учёт широких символов).
+func rowWidth(g []mglyph) int {
+	w := 0
+	for _, gl := range g {
+		w += runewidth.RuneWidth(gl.r)
+	}
+	return w
+}
+
+// wrapGlyphs переносит символы по ширине w (в КЛЕТКАХ терминала — эмодзи/CJK
+// занимают 2), предпочитая разрыв по пробелу; '\n' начинает новую строку.
+// Символы нулевой ширины (комбинирующие/невидимые) отбрасываются — защита от
+// перекоса вывода.
 func wrapGlyphs(g []mglyph, w int) [][]mglyph {
 	if w < 1 {
 		w = 1
 	}
 	var rows [][]mglyph
 	cur := []mglyph{}
+	curW := 0
 	for _, gl := range g {
 		if gl.r == '\n' {
 			rows = append(rows, cur)
 			cur = []mglyph{}
+			curW = 0
 			continue
 		}
-		if len(cur) >= w {
+		gw := runewidth.RuneWidth(gl.r)
+		if gw == 0 {
+			continue
+		}
+		if curW+gw > w {
 			// Ищем последний пробел в хвосте, чтобы не рвать слово посередине.
 			br := -1
-			for k := len(cur) - 1; k >= 0 && k > len(cur)-w/3-1; k-- {
+			for k := len(cur) - 1; k >= 0; k-- {
 				if cur[k].r == ' ' {
 					br = k
 					break
 				}
 			}
-			if br > 0 {
+			if br > 0 && br > len(cur)*2/3 { // пробел не слишком далеко от края
 				rows = append(rows, cur[:br])
 				cur = append([]mglyph{}, cur[br+1:]...)
 			} else {
 				rows = append(rows, cur)
 				cur = []mglyph{}
 			}
+			curW = rowWidth(cur)
 		}
 		cur = append(cur, gl)
+		curW += gw
 	}
 	rows = append(rows, cur)
 	return rows

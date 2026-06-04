@@ -19,6 +19,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
 
 	"github.com/cultivateweb/tgcli/internal/cache"
@@ -673,39 +674,25 @@ func (u *ui) treeAvail(level int) int {
 }
 
 // treeLine форматирует строку узла: заголовок слева, счётчик прижат к правому
-// краю, между ними — заполнение пробелами до доступной ширины width. Длинный
-// заголовок усекается многоточием.
+// краю, между ними — заполнение пробелами до доступной ширины width. Ширина
+// считается в КЛЕТКАХ терминала (эмодзи/CJK = 2), длинный заголовок усекается
+// многоточием — иначе широкие символы перекашивают выравнивание.
 func treeLine(title, count string, width int) string {
-	tr := []rune(strings.TrimSpace(title))
+	title = strings.TrimSpace(title)
 	if count == "" {
-		if len(tr) > width {
-			tr = trimEllipsis(tr, width)
-		}
-		return string(tr)
+		return runewidth.Truncate(title, width, "…")
 	}
-	cr := []rune(count)
-	maxTitle := width - len(cr) - 1
+	cw := runewidth.StringWidth(count)
+	maxTitle := width - cw - 1
 	if maxTitle < 1 {
 		maxTitle = 1
 	}
-	if len(tr) > maxTitle {
-		tr = trimEllipsis(tr, maxTitle)
-	}
-	gap := width - len(tr) - len(cr)
+	title = runewidth.Truncate(title, maxTitle, "…")
+	gap := width - runewidth.StringWidth(title) - cw
 	if gap < 1 {
 		gap = 1
 	}
-	return string(tr) + strings.Repeat(" ", gap) + count
-}
-
-func trimEllipsis(r []rune, n int) []rune {
-	if n <= 1 {
-		return []rune{'…'}
-	}
-	out := make([]rune, n)
-	copy(out, r[:n-1])
-	out[n-1] = '…'
-	return out
+	return title + strings.Repeat(" ", gap) + count
 }
 
 // treeParent находит родителя узла (TreeNode не хранит ссылку на родителя).
