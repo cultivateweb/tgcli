@@ -6,12 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"unicode/utf16"
 
-	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 )
 
@@ -168,31 +165,6 @@ func docFileName(doc *tg.Document) string {
 		}
 	}
 	return ""
-}
-
-// DownloadMedia перезапрашивает сообщение (ради свежего file_reference) и
-// скачивает вложение в каталог dir. Возвращает путь к сохранённому файлу.
-func (s *Session) DownloadMedia(ctx context.Context, peer tg.InputPeerClass, msgID int64, dir string) (string, error) {
-	m, err := s.fetchMessage(ctx, peer, msgID)
-	if err != nil {
-		return "", err
-	}
-	media, ok := m.GetMedia()
-	if !ok {
-		return "", errors.New("в сообщении нет вложения")
-	}
-	loc, name, err := fileLocation(media, msgID)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, name)
-	if _, err := downloader.NewDownloader().Download(s.api, loc).ToPath(ctx, path); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 func (s *Session) fetchMessage(ctx context.Context, peer tg.InputPeerClass, msgID int64) (*tg.Message, error) {

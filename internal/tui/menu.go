@@ -73,7 +73,7 @@ func (u *ui) menus() []topMenu {
 		}},
 		{"Вид", []menuItem{
 			{"Панель чатов", "^B", u.toggleTree},
-			{"Панель деталей", "^E", u.toggleDetails},
+			{"Информация", "Alt+I", u.toggleInfo},
 		}},
 		{"Правка", []menuItem{
 			{"Копировать", "c", u.copyMsg},
@@ -261,7 +261,7 @@ func (u *ui) runStatusAction(id string) {
 	case "tree":
 		u.toggleTree()
 	case "details":
-		u.toggleDetails()
+		u.toggleInfo()
 	case "send":
 		text := strings.TrimSpace(u.input.GetText())
 		if text != "" && u.open != nil && u.open.CanSend {

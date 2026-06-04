@@ -8,6 +8,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -104,10 +105,12 @@ type ui struct {
 	showDetails bool
 
 	msgSel    int          // индекс выбранного сообщения
+	msgElem   int          // индекс элемента внутри сообщения (Tab: текст/ссылка/вложение)
 	msgScroll int          // прокрутка панели сообщений (в логических строках)
 	selected  map[int]bool // мультивыбор сообщений
 
-	forumLoaded map[string]bool // ключи супергрупп-форумов, чьи темы уже загружены
+	forumLoaded map[string]bool       // ключи супергрупп-форумов, чьи темы загружены
+	downloads   map[int64]*download   // активные загрузки вложений (по ID сообщения)
 }
 
 // Run строит и запускает интерфейс. c и updates могут быть nil.
@@ -115,7 +118,7 @@ func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-
 	applyTheme()
 	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
 		app: tview.NewApplication(), selected: map[int]bool{},
-		forumLoaded: map[string]bool{}, menuActive: -1}
+		forumLoaded: map[string]bool{}, downloads: map[int64]*download{}, menuActive: -1}
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
 
@@ -340,10 +343,16 @@ func (u *ui) build() {
 			}
 			u.app.SetFocus(u.tree)
 			return nil
+		case tcell.KeyTab: // Tab/Shift+Tab → следующий/предыдущий элемент сообщения
+			u.cycleElement(1)
+			return nil
+		case tcell.KeyBacktab:
+			u.cycleElement(-1)
+			return nil
 		}
 		switch ev.Rune() {
 		case 'c':
-			u.copyMsg()
+			u.elemCopy() // копировать: текст сообщения или адрес ссылки
 			return nil
 		case 'r':
 			u.quoteMsg()
@@ -358,7 +367,7 @@ func (u *ui) build() {
 			u.copySelected()
 			return nil
 		case 'o':
-			u.openAttachment()
+			u.elemOpen() // открыть: ссылку в браузере или скачать вложение
 			return nil
 		}
 		return ev
@@ -382,11 +391,14 @@ func (u *ui) build() {
 			u.app.SetFocus(u.messages)
 			return nil
 		}
+		if ev.Key() == tcell.KeyTab { // Tab не нужен в поле ввода (панельный Tab убран)
+			return nil
+		}
 		return ev
 	})
 
 	u.details = tview.NewList().ShowSecondaryText(true)
-	u.detailsTitle = " Детали "
+	u.detailsTitle = " Информация "
 	u.details.SetBorder(true).SetTitle(u.detailsTitle)
 	u.details.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
 		off, _ := u.details.GetOffset()
@@ -450,6 +462,10 @@ func (u *ui) build() {
 				u.app.Stop()
 				return nil
 			}
+			if r == 'i' || r == 'ш' { // Alt+I — инфо-панель (ш — клавиша I в рус. раскладке)
+				u.toggleInfo()
+				return nil
+			}
 			for i, m := range u.menus() {
 				if hot := []rune(m.title); len(hot) > 0 && unicode.ToLower(hot[0]) == r {
 					u.openMenu(i)
@@ -473,20 +489,11 @@ func (u *ui) build() {
 				u.openMenu(0)
 			}
 			return nil
-		case tcell.KeyBacktab: // Shift+Tab — фокус назад
-			u.cycleFocusBack()
-			return nil
 		case tcell.KeyF1:
 			u.showHelp()
 			return nil
-		case tcell.KeyTab:
-			u.cycleFocus()
-			return nil
 		case tcell.KeyCtrlB:
 			u.toggleTree()
-			return nil
-		case tcell.KeyCtrlE:
-			u.toggleDetails()
 			return nil
 		}
 		return ev
@@ -584,6 +591,24 @@ func (u *ui) toggleDetails() {
 	u.rebuildMid()
 	if !u.showDetails && u.app.GetFocus() == u.details {
 		u.app.SetFocus(u.tree)
+	}
+}
+
+// toggleInfo открывает/закрывает панель «Информация» (Alt+I) с переносом фокуса:
+// при открытии фокус уходит в неё, при закрытии — обратно к сообщениям/чатам.
+func (u *ui) toggleInfo() {
+	u.showDetails = !u.showDetails
+	if u.showDetails {
+		u.renderDetails()
+		u.rebuildMid()
+		u.app.SetFocus(u.details)
+		return
+	}
+	u.rebuildMid()
+	if u.showTree {
+		u.app.SetFocus(u.tree)
+	} else {
+		u.app.SetFocus(u.messages)
 	}
 }
 
@@ -787,6 +812,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 	u.open = &dd
 	u.history = nil
 	u.msgSel = -1
+	u.msgElem = 0
 	u.msgScroll = 0
 	u.selected = map[int]bool{}
 	u.input.SetDisabled(!dd.CanSend)
@@ -1048,7 +1074,7 @@ func (u *ui) renderDetails() {
 	if u.open.Unread > 0 {
 		add("Непрочитано", fmt.Sprint(u.open.Unread))
 	}
-	u.detailsTitle = " Детали — c копировать "
+	u.detailsTitle = " Информация — c копировать "
 	u.setTitle(u.details, u.detailsTitle)
 }
 
@@ -1065,9 +1091,11 @@ func (u *ui) selectMsg(i int) {
 		i = len(u.history) - 1
 	}
 	u.msgSel = i
+	u.msgElem = 0 // при смене сообщения навигация по элементам — с начала
 	// Перерисовываем: выбранное сообщение рендерится одноцветным (полоса-курсор),
 	// поэтому при смене выбора нужно пересобрать текст, а не только подсветку.
 	u.renderMessages()
+	u.showElementHints()
 }
 
 func (u *ui) selectedIndices() []int {
@@ -1146,8 +1174,106 @@ func (u *ui) toggleSelect() {
 	u.renderMessages()
 }
 
-// openAttachment скачивает вложение выбранного сообщения во временный каталог и
-// открывает его внешней программой (xdg-open). Загрузка идёт в фоне.
+// msgElement — навигационный элемент сообщения (Tab): текст, ссылка, вложение.
+type msgElement struct {
+	kind  string // text, link, media
+	value string // для link — URL
+	label string
+}
+
+// messageElements собирает элементы сообщения i для навигации по Tab.
+func (u *ui) messageElements(i int) []msgElement {
+	if i < 0 || i >= len(u.history) {
+		return nil
+	}
+	msg := u.history[i]
+	var els []msgElement
+	if strings.TrimSpace(msg.Plain()) != "" {
+		els = append(els, msgElement{kind: "text", label: "текст"})
+	}
+	seen := map[string]bool{}
+	for _, s := range msg.Spans {
+		if s.URL != "" && !seen[s.URL] {
+			seen[s.URL] = true
+			els = append(els, msgElement{kind: "link", value: s.URL, label: s.URL})
+		}
+	}
+	if msg.Media != nil {
+		els = append(els, msgElement{kind: "media", label: msg.Media.Label()})
+	}
+	return els
+}
+
+func (u *ui) currentElement() (msgElement, bool) {
+	els := u.messageElements(u.msgSel)
+	if u.msgElem < 0 || u.msgElem >= len(els) {
+		return msgElement{}, false
+	}
+	return els[u.msgElem], true
+}
+
+// cycleElement переключает текущий элемент сообщения и обновляет подсказки.
+func (u *ui) cycleElement(step int) {
+	els := u.messageElements(u.msgSel)
+	if len(els) == 0 {
+		return
+	}
+	u.msgElem = (u.msgElem + step + len(els)) % len(els)
+	u.showElementHints()
+}
+
+// showElementHints показывает в строке состояния текущий элемент и его действия.
+func (u *ui) showElementHints() {
+	els := u.messageElements(u.msgSel)
+	if len(els) <= 1 {
+		u.status.SetText(msgHints())
+		return
+	}
+	pos := fmt.Sprintf("[%d/%d] ", u.msgElem+1, len(els))
+	switch e := els[u.msgElem]; e.kind {
+	case "link":
+		u.status.SetText(fmt.Sprintf("[#7aa2f7]%s🔗 %s[-]  ", pos, tview.Escape(e.value)) +
+			borlandBar([][3]string{{"open", "o", "Браузер"}, {"copy", "c", "Копир.ссылку"}, {"menu", "F10", "Меню"}}))
+	case "media":
+		u.status.SetText(fmt.Sprintf("[#e0af68]%s📎 %s[-]  ", pos, tview.Escape(e.label)) +
+			borlandBar([][3]string{{"open", "o", "Скачать/Открыть"}, {"menu", "F10", "Меню"}}))
+	default:
+		u.status.SetText(pos + msgHints())
+	}
+}
+
+// elemCopy копирует адрес ссылки (если выбрана ссылка) или текст сообщения.
+func (u *ui) elemCopy() {
+	if e, ok := u.currentElement(); ok && e.kind == "link" {
+		u.copyToClipboard(e.value, "[#9ece6a]Ссылка скопирована[-]  "+msgHints())
+		return
+	}
+	u.copyMsg()
+}
+
+// elemOpen открывает ссылку в браузере или скачивает/открывает вложение.
+func (u *ui) elemOpen() {
+	if e, ok := u.currentElement(); ok && e.kind == "link" {
+		if err := openExternal(e.value); err != nil {
+			u.status.SetText("[#f7768e]Не удалось открыть ссылку[-]")
+		} else {
+			u.status.SetText("[#9ece6a]Открыто: " + tview.Escape(e.value) + "[-]  " + msgHints())
+		}
+		return
+	}
+	u.openAttachment()
+}
+
+// download — активная загрузка вложения: отмена (для паузы) и прогресс.
+type download struct {
+	cancel     context.CancelFunc
+	done, total int64
+}
+
+// openAttachment по клавише o управляет вложением выбранного сообщения:
+//   - уже скачано (есть в кеше) → открыть внешней программой;
+//   - идёт загрузка → поставить на паузу (отменить, .part сохраняется);
+//   - не качается → начать/докачать в фоне с прогрессом, по завершении открыть.
 func (u *ui) openAttachment() {
 	if u.msgSel < 0 || u.msgSel >= len(u.history) {
 		return
@@ -1160,23 +1286,105 @@ func (u *ui) openAttachment() {
 	if u.open == nil || u.sess == nil {
 		return
 	}
-	open := *u.open
 	id := msg.ID
-	u.status.SetText("[#7dcfff]Загрузка вложения…[-]")
+	path := u.attachmentPath(id, msg.Media)
+	name := filepath.Base(path)
+
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 { // уже в кеше
+		u.openCached(path)
+		return
+	}
+	if dl := u.downloads[id]; dl != nil { // уже качается → пауза
+		dl.cancel()
+		delete(u.downloads, id)
+		u.status.SetText("[#e0af68]⏸ Пауза: " + tview.Escape(name) + " (o — продолжить)[-]")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(u.ctx)
+	u.downloads[id] = &download{cancel: cancel, total: msg.Media.Size}
+	open := *u.open
+	u.status.SetText("[#7dcfff]⬇ Загрузка " + tview.Escape(name) + "…[-]")
 	go func() {
-		dir := filepath.Join(os.TempDir(), "tgcli")
-		path, err := u.sess.DownloadMedia(u.ctx, open.Peer, id, dir)
+		err := u.sess.DownloadMediaTo(ctx, open.Peer, id, path, func(done, total int64) {
+			u.app.QueueUpdateDraw(func() {
+				if dl := u.downloads[id]; dl != nil {
+					dl.done, dl.total = done, total
+					u.showDownloadProgress(name, done, total)
+				}
+			})
+		})
 		u.app.QueueUpdateDraw(func() {
+			delete(u.downloads, id)
 			switch {
+			case errors.Is(err, context.Canceled):
+				// пауза — статус уже показан, ничего не делаем
 			case err != nil:
 				u.status.SetText("[#f7768e]Ошибка загрузки: " + tview.Escape(err.Error()) + "[-]")
-			case openExternal(path) != nil:
-				u.status.SetText("[#e0af68]Сохранено: " + tview.Escape(path) + " (открыть не удалось)[-]")
 			default:
-				u.status.SetText("[#9ece6a]Открыто: " + tview.Escape(path) + "[-]  " + msgHints())
+				u.openCached(path)
 			}
 		})
 	}()
+}
+
+// openCached открывает уже скачанный файл внешней программой.
+func (u *ui) openCached(path string) {
+	if err := openExternal(path); err != nil {
+		u.status.SetText("[#e0af68]Сохранено: " + tview.Escape(path) + " (открыть не удалось)[-]")
+		return
+	}
+	u.status.SetText("[#9ece6a]Открыто: " + tview.Escape(path) + "[-]  " + msgHints())
+}
+
+// showDownloadProgress показывает прогресс загрузки в строке состояния.
+func (u *ui) showDownloadProgress(name string, done, total int64) {
+	if total > 0 {
+		u.status.SetText(fmt.Sprintf("[#7dcfff]⬇ %s %d%% (%s / %s)[-]  o — пауза",
+			tview.Escape(name), done*100/total, humanBytes(done), humanBytes(total)))
+	} else {
+		u.status.SetText(fmt.Sprintf("[#7dcfff]⬇ %s %s[-]  o — пауза", tview.Escape(name), humanBytes(done)))
+	}
+}
+
+// attachmentPath — путь к кешу вложения: <cache>/tgcli/media/<чат>/<id>_<имя>.
+func (u *ui) attachmentPath(msgID int64, m *telegram.Media) string {
+	name := m.FileName
+	if name == "" {
+		switch m.Kind {
+		case "photo":
+			name = "photo.jpg"
+		case "voice":
+			name = "voice.ogg"
+		case "video", "gif":
+			name = m.Kind + ".mp4"
+		default:
+			name = m.Kind
+		}
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	peer := "chat"
+	if u.open != nil {
+		peer = strings.NewReplacer("/", "_", ":", "_").Replace(u.open.Ref.Key())
+	}
+	return filepath.Join(base, "tgcli", "media", peer,
+		fmt.Sprintf("%d_%s", msgID, filepath.Base(name)))
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d Б", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), []string{"КБ", "МБ", "ГБ", "ТБ"}[exp])
 }
 
 // openExternal открывает файл системной программой по умолчанию (Linux: xdg-open).
@@ -1332,16 +1540,16 @@ func borlandBar(items [][3]string) string {
 
 func statusHints() string {
 	return borlandBar([][3]string{
-		{"help", "F1", "Справка"}, {"menu", "F10", "Меню"}, {"tab", "Tab", "Фокус"},
-		{"tree", "^B", "Чаты"}, {"details", "^E", "Детали"},
+		{"help", "F1", "Справка"}, {"menu", "F10", "Меню"},
+		{"tree", "^B", "Чаты"}, {"details", "Alt+I", "Инфо"},
 		{"send", "Enter", "Отпр"}, {"quit", "Alt+X", "Выход"},
 	})
 }
 
 func msgHints() string {
 	return borlandBar([][3]string{
-		{"copy", "c", "Копир"}, {"quote", "r", "Цитата"}, {"del", "d", "Удал"},
-		{"mark", "Spc", "Выбор"}, {"copysel", "y", "Копир✓"}, {"open", "o", "Влож"},
+		{"tab", "Tab", "Элемент"}, {"copy", "c", "Копир"}, {"quote", "r", "Цитата"},
+		{"del", "d", "Удал"}, {"mark", "Spc", "Выбор"}, {"open", "o", "Откр"},
 		{"menu", "F10", "Меню"},
 	})
 }
