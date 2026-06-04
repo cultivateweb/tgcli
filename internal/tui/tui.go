@@ -109,15 +109,16 @@ type ui struct {
 	msgScroll int          // прокрутка панели сообщений (в логических строках)
 	selected  map[int]bool // мультивыбор сообщений
 
-	forumLoaded map[string]bool       // ключи супергрупп-форумов, чьи темы загружены
-	downloads   map[int64]*download   // активные загрузки вложений (по ID сообщения)
+	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
+	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
+	treeWidth   int                 // текущая внутренняя ширина панели «Чаты» (для выравнивания)
 }
 
 // Run строит и запускает интерфейс. c и updates могут быть nil.
 func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage, version string) error {
 	applyTheme()
 	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
-		app: tview.NewApplication(), selected: map[int]bool{},
+		app: tview.NewApplication(), selected: map[int]bool{}, treeWidth: 48,
 		forumLoaded: map[string]bool{}, downloads: map[int64]*download{}, menuActive: -1}
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
@@ -237,6 +238,16 @@ func (u *ui) build() {
 	u.tree.SetBorder(true).SetTitle(titleTree)
 	u.tree.SetGraphics(true)
 	u.tree.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		// Ширина панели динамическая; при её изменении (старт/ресайз) пересобираем
+		// дерево, чтобы счётчики снова встали ровно по правому краю.
+		if iw := width - 2; iw > 0 && iw != u.treeWidth {
+			u.treeWidth = iw
+			go u.app.QueueUpdateDraw(func() {
+				if u.treeWidth == iw {
+					u.buildTree()
+				}
+			})
+		}
 		drawScrollbar(screen, x+width-1, y+1, height-2, u.tree.GetScrollOffset(), u.tree.GetRowCount(), height-2)
 		return u.tree.GetInnerRect()
 	})
@@ -536,7 +547,8 @@ func (u *ui) root() *tview.Flex {
 func (u *ui) rebuildMid() {
 	u.mid.Clear()
 	if u.showTree {
-		u.mid.AddItem(u.tree, treeColWidth, 0, false)
+		// Пропорция 1:1 с центром → панель «Чаты» примерно в половину ширины.
+		u.mid.AddItem(u.tree, 0, 1, false)
 	}
 	u.mid.AddItem(u.center, 0, 1, false)
 	if u.showDetails {
@@ -632,19 +644,29 @@ func (u *ui) loadDialogs() {
 }
 
 func (u *ui) setDialogs(d []telegram.Dialog) {
-	u.dialogs = d
+	// Дедуп по ключу чата: иногда список диалогов содержит один и тот же чат
+	// дважды (перекрытие страниц/папки) — оставляем первое вхождение.
+	seen := make(map[string]bool, len(d))
+	uniq := make([]telegram.Dialog, 0, len(d))
+	for _, x := range d {
+		k := x.Ref.Key()
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		uniq = append(uniq, x)
+	}
+	u.dialogs = uniq
 	u.buildTree()
 }
 
-// treeColWidth — ширина панели «Чаты» (используется и в rebuildMid, и для
-// выравнивания счётчиков по правому краю).
-const treeColWidth = 32
-
 // treeAvail — свободная ширина под текст узла на уровне level. TreeView рисует
 // текст со смещением textX = 3·level (graphics + отступ 2 на уровень), поэтому
-// доступная ширина = внутренняя ширина (без рамки) минус это смещение.
-func treeAvail(level int) int {
-	w := (treeColWidth - 2) - 3*level - 1 // −1 — зазор перед скроллбаром
+// доступная ширина = внутренняя ширина панели минус это смещение. Ширина панели
+// динамическая (≈половина экрана) — берётся из u.treeWidth, который обновляется
+// при отрисовке дерева.
+func (u *ui) treeAvail(level int) int {
+	w := u.treeWidth - 3*level - 1 // −1 — зазор перед скроллбаром
 	if w < 4 {
 		w = 4
 	}
@@ -737,7 +759,7 @@ func (u *ui) loadForum(node *tview.TreeNode, d telegram.Dialog) {
 				td.TopicID = t.ID
 				td.TopicTitle = t.Title
 				td.CanSend = d.CanSend && !t.Closed
-				node.AddChild(tview.NewTreeNode(treeLine(title, "", treeAvail(3))).
+				node.AddChild(tview.NewTreeNode(treeLine(title, "", u.treeAvail(3))).
 					SetReference(&td).SetColor(col))
 			}
 		})
@@ -763,7 +785,7 @@ func (u *ui) buildTree() {
 		}
 	}
 	if len(unread) > 0 {
-		cat := tview.NewTreeNode(treeLine("● Непрочитанные", fmt.Sprintf("(%d)", len(unread)), treeAvail(1))).
+		cat := tview.NewTreeNode(treeLine("● Непрочитанные", fmt.Sprintf("(%d)", len(unread)), u.treeAvail(1))).
 			SetColor(tcell.GetColor(kindColor["unread"])).SetSelectable(true).SetExpanded(true)
 		for i := range unread {
 			cat.AddChild(u.chatNode(unread[i]))
@@ -776,7 +798,7 @@ func (u *ui) buildTree() {
 		if len(list) == 0 {
 			continue
 		}
-		cat := tview.NewTreeNode(treeLine(g.label, fmt.Sprintf("(%d)", len(list)), treeAvail(1))).
+		cat := tview.NewTreeNode(treeLine(g.label, fmt.Sprintf("(%d)", len(list)), u.treeAvail(1))).
 			SetColor(tcell.GetColor(kindColor[g.key])).SetSelectable(true).SetExpanded(g.key == "self")
 		for i := range list {
 			cat.AddChild(u.chatNode(list[i]))
@@ -797,7 +819,7 @@ func (u *ui) chatNode(d telegram.Dialog) *tview.TreeNode {
 	if c, ok := kindColor[d.Kind]; ok {
 		col = tcell.GetColor(c)
 	}
-	node := tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
+	node := tview.NewTreeNode(treeLine(d.Title, count, u.treeAvail(2))).
 		SetReference(&d).SetColor(col)
 	if d.Forum {
 		node.SetExpanded(false)

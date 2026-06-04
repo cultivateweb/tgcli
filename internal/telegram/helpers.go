@@ -71,8 +71,8 @@ func DisplayName(u *tg.User) string {
 	}
 	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
 	switch {
-	case name != "" && u.Username != "":
-		return name + " (@" + u.Username + ")"
+	case u.Username != "" && name != "":
+		return "@" + u.Username + " - " + name
 	case u.Username != "":
 		return "@" + u.Username
 	case name != "":
@@ -198,10 +198,14 @@ func peerTitleKind(p tg.InputPeerClass, ent peer.Entities) (title, kind string) 
 		return "id " + strconv.FormatInt(v.ChatID, 10), "group"
 	case *tg.InputPeerChannel:
 		if ch, ok := ent.Channel(v.ChannelID); ok {
-			if ch.Megagroup {
-				return ch.Title, "supergroup"
+			title := ch.Title
+			if ch.Username != "" { // @username - Название
+				title = "@" + ch.Username + " - " + ch.Title
 			}
-			return ch.Title, "channel"
+			if ch.Megagroup {
+				return title, "supergroup"
+			}
+			return title, "channel"
 		}
 		return "id " + strconv.FormatInt(v.ChannelID, 10), "channel"
 	}
