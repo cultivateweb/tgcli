@@ -28,11 +28,10 @@ func newTestUI(t *testing.T) (*ui, tcell.SimulationScreen, func(scenario string)
 	})
 	u.open = &telegram.Dialog{Title: "Alice", Kind: "user", CanSend: true, Ref: telegram.PeerRef{Type: "user", ID: 1}}
 	u.msgTitle = " Alice "
-	u.history = []telegram.HistoryMessage{
+	u.setHistory([]telegram.HistoryMessage{
 		{ID: 1, Author: "Alice", Text: "привет"},
 		{ID: 2, Out: true, Text: "здорово"},
-	}
-	u.renderMessages()
+	})
 	u.renderDetails()
 
 	screen := tcell.NewSimulationScreen("")
@@ -143,7 +142,6 @@ func TestLiveUpdateWhileMenuOpen(t *testing.T) {
 	key(s, tcell.KeyF10) // открыть меню
 	u.app.QueueUpdateDraw(func() {
 		u.history = append(u.history, telegram.HistoryMessage{ID: 3, Author: "Alice", Text: "ещё"})
-		u.renderMessages()
 	})
 	time.Sleep(120 * time.Millisecond)
 	key(s, tcell.KeyEscape) // закрыть меню

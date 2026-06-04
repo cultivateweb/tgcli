@@ -81,7 +81,7 @@ type ui struct {
 	app      *tview.Application
 	pages    *tview.Pages
 	tree     *tview.TreeView
-	messages *tview.TextView
+	messages *msgList
 	input    *tview.TextArea
 	details  *tview.List
 	status   *tview.TextView
@@ -104,10 +104,9 @@ type ui struct {
 	showTree    bool
 	showDetails bool
 
-	msgSel    int          // индекс выбранного сообщения
-	msgElem   int          // индекс элемента внутри сообщения (Tab: текст/ссылка/вложение)
-	msgScroll int          // прокрутка панели сообщений (в логических строках)
-	selected  map[int]bool // мультивыбор сообщений
+	msgSel   int          // индекс выбранного сообщения
+	msgElem  int          // индекс элемента внутри сообщения (Tab: текст/ссылка/вложение)
+	selected map[int]bool // мультивыбор сообщений
 
 	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
 	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
@@ -157,6 +156,7 @@ const (
 	// Зебра в панели сообщений: фон чередуется у соседних сообщений.
 	colorMsgBg    = "#0000a8" // чётные — базовый синий
 	colorMsgBgAlt = "#000086" // нечётные — чуть темнее
+	colorMsgSel   = "#1f5a6b" // выбранное — полоса-курсор во всю ширину
 )
 
 // applyTheme задаёт палитру в стиле Turbo Pascal: насыщенный синий фон,
@@ -308,15 +308,9 @@ func (u *ui) build() {
 		return ev
 	})
 
-	u.messages = tview.NewTextView().SetDynamicColors(true).SetScrollable(true).SetWrap(true)
-	u.messages.SetRegions(true)
+	u.messages = newMsgList(u) // свой примитив ленты (фон на всю ширину, усечение, F3)
 	u.msgTitle = " Сообщения "
 	u.messages.SetBorder(true).SetTitle(u.msgTitle)
-	u.messages.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		row, _ := u.messages.GetScrollOffset()
-		drawScrollbar(screen, x+width-1, y+1, height-2, row, u.messages.GetOriginalLineCount(), height-2)
-		return u.messages.GetInnerRect()
-	})
 	markFocus(u.messages,
 		func() {
 			u.lastPanel = u.messages
@@ -359,6 +353,11 @@ func (u *ui) build() {
 			return nil
 		case tcell.KeyBacktab:
 			u.cycleElement(-1)
+			return nil
+		case tcell.KeyF3: // F3 → полный текст сообщения в отдельном окне
+			if u.msgSel >= 0 && u.msgSel < len(u.history) {
+				u.showMessageViewer(u.history[u.msgSel])
+			}
 			return nil
 		}
 		switch ev.Rune() {
@@ -461,9 +460,9 @@ func (u *ui) build() {
 
 	// Глобальные хоткеи.
 	u.app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		// При открытом модальном диалоге все клавиши идут в него (Tab между
-		// кнопками, Enter/Esc), глобальные хоткеи не вмешиваются.
-		if u.pages != nil && u.pages.HasPage("dialog") {
+		// При открытом модальном окне (диалог/просмотр сообщения) все клавиши
+		// идут в него — глобальные хоткеи не вмешиваются.
+		if u.pages != nil && (u.pages.HasPage("dialog") || u.pages.HasPage("viewer")) {
 			return ev
 		}
 		// Alt+буква: открыть пункт меню по «горячей» букве; Alt+X — выход.
@@ -835,7 +834,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 	u.history = nil
 	u.msgSel = -1
 	u.msgElem = 0
-	u.msgScroll = 0
+	u.messages.offset = 0
 	u.selected = map[int]bool{}
 	u.input.SetDisabled(!dd.CanSend)
 	if dd.CanSend {
@@ -849,7 +848,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 		u.msgTitle = " " + tview.Escape(dd.Title) + " "
 	}
 	u.setTitle(u.messages, u.msgTitle)
-	u.messages.SetText("[#565f89]Загрузка истории…[-]")
+	u.messages.placeholder = "Загрузка истории…"
 	if u.showDetails {
 		u.renderDetails()
 	}
@@ -861,8 +860,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 			if h, err := u.cache.History(dd.Ref.Key()); err == nil && len(h) > 0 {
 				u.app.QueueUpdateDraw(func() {
 					if u.sameChat(dd) {
-						u.history = h
-						u.renderMessages()
+						u.setHistory(h)
 					}
 				})
 			}
@@ -884,11 +882,11 @@ func (u *ui) openChat(d telegram.Dialog) {
 				return
 			}
 			if err != nil {
-				u.messages.SetText("[#f7768e]Ошибка: " + tview.Escape(err.Error()))
+				u.messages.placeholder = "Ошибка загрузки истории"
+				u.status.SetText("[#f7768e]Ошибка: " + tview.Escape(err.Error()) + "[-]")
 				return
 			}
-			u.history = h
-			u.renderMessages()
+			u.setHistory(h)
 		})
 	}()
 }
@@ -924,7 +922,6 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 		u.app.QueueUpdateDraw(func() {
 			if u.open != nil && u.open.TopicID == 0 && nm.PeerKey == u.open.Ref.Key() {
 				u.history = append(u.history, nm.Message)
-				u.renderMessages()
 			} else if !nm.Message.Out {
 				u.status.SetText(" [#ffff55::b]● НОВОЕ[-:-:-] " + statusHints())
 			}
@@ -934,150 +931,44 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 
 // ── Рендер ─────────────────────────────────────────────────────────────────
 
-func (u *ui) renderMessages() {
-	if len(u.history) == 0 {
-		u.messages.SetText("")
-		return
+// setHistory ставит историю и выставляет курсор на последнее сообщение, если он
+// вышел за пределы (после загрузки/перезагрузки чата). Отрисовку делает примитив
+// messages при следующем Draw.
+func (u *ui) setHistory(h []telegram.HistoryMessage) {
+	u.history = h
+	if u.msgSel < 0 || u.msgSel >= len(h) {
+		u.msgSel = len(h) - 1
 	}
-	if u.msgSel < 0 || u.msgSel >= len(u.history) {
-		u.msgSel = len(u.history) - 1
-	}
-	var b strings.Builder
-	// Считаем логические строки, чтобы потом прокрутить к выбранному сообщению
-	// вручную (ScrollTo), а не через ScrollToHighlight: последний недопарсивает
-	// индекс за одну отрисовку — низ панели остаётся пустым.
-	cur, selStart, selEnd := 0, 0, 0
-	for i := range u.history {
-		if i > 0 {
-			b.WriteByte('\n')
-			cur++
-		}
-		start := cur
-		content := u.buildMessage(i)
-		b.WriteString(`["m` + fmt.Sprint(i) + `"]`)
-		b.WriteString(content)
-		b.WriteString(`[""]`)
-		cur += strings.Count(content, "\n")
-		if i == u.msgSel {
-			selStart, selEnd = start, cur
-		}
-	}
-	total := cur + 1
-	u.messages.SetText(b.String())
-	u.messages.Highlight("m" + fmt.Sprint(u.msgSel))
-
-	_, _, _, vh := u.messages.GetInnerRect()
-	if vh <= 0 {
-		u.messages.ScrollTo(u.msgScroll, 0)
-		return
-	}
-	off := u.msgScroll
-	if selStart < off { // выбранное выше окна — подкрутить вверх
-		off = selStart
-	}
-	if selEnd > off+vh-1 { // выбранное ниже окна — подкрутить вниз
-		off = selEnd - vh + 1
-	}
-	if max := total - vh; off > max {
-		off = max
-	}
-	if off < 0 {
-		off = 0
-	}
-	u.msgScroll = off
-	u.messages.ScrollTo(off, 0)
 }
 
-// buildMessage формирует содержимое одного сообщения (без обёртки региона и без
-// завершающего перевода строки). Выбранное сообщение рисуется одноцветным —
-// тогда инверсия региона даёт ровную полосу-курсор на всех его строках.
-func (u *ui) buildMessage(i int) string {
-	msg := u.history[i]
-	ts := msg.Date.Format("15:04")
-	var b strings.Builder
-	if i == u.msgSel {
-		// Базовый фон — чтобы инверсия-курсор была чистой полосой.
-		b.WriteString("[:" + colorMsgBg + ":]")
-		if u.selected[i] {
-			b.WriteString("✓ ")
-		}
-		prefix := "→"
-		if !msg.Out {
-			prefix = msg.Author + ":"
-		}
-		fmt.Fprintf(&b, "%s %s %s", ts, tview.Escape(prefix), tview.Escape(msg.Plain()))
-		if msg.Media != nil {
-			if msg.Plain() != "" {
-				b.WriteString("\n         ")
-			}
-			fmt.Fprintf(&b, "📎 %s", tview.Escape(msg.Media.Label()))
-		}
-		return b.String()
-	}
-	// Зебра: фон зависит от чётности; сбросы ниже сохраняют фон ([-] и [-::-]).
-	bg := colorMsgBg
-	if i%2 == 1 {
-		bg = colorMsgBgAlt
-	}
-	b.WriteString("[:" + bg + ":]")
-	if u.selected[i] {
-		b.WriteString("[#e0af68]✓ [-]")
-	}
-	if msg.Out {
-		fmt.Fprintf(&b, "[#565f89]%s[-] [#9ece6a]→[-] ", ts)
-	} else {
-		fmt.Fprintf(&b, "[#565f89]%s[-] [#7dcfff::b]%s:[-::-] ", ts, tview.Escape(msg.Author))
-	}
-	body := renderBody(msg)
-	b.WriteString(body)
+// showMessageViewer открывает полный текст сообщения в отдельном скроллируемом
+// окне (F3); закрытие — Esc.
+func (u *ui) showMessageViewer(msg telegram.HistoryMessage) {
+	text := msg.Plain()
 	if msg.Media != nil {
-		label := tview.Escape(msg.Media.Label())
-		if body != "" {
-			b.WriteString("\n         ")
+		if text != "" {
+			text += "\n\n"
 		}
-		fmt.Fprintf(&b, "[#e0af68]📎 %s[-]", label)
+		text += "📎 " + msg.Media.Label()
 	}
-	return b.String()
-}
-
-// renderBody превращает тело сообщения в строку с tview-разметкой: применяет
-// форматирование Telegram (жирный/курсив/подчёркнутый/зачёркнутый/код/ссылка).
-// Если форматных сегментов нет — экранированный plain-текст.
-func renderBody(msg telegram.HistoryMessage) string {
-	if len(msg.Spans) == 0 {
-		return tview.Escape(msg.Text)
+	title := msg.Author
+	if msg.Out {
+		title = "Вы"
 	}
-	var b strings.Builder
-	for _, s := range msg.Spans {
-		fg, flags := "", ""
-		if s.B {
-			flags += "b"
+	tv := tview.NewTextView().SetWrap(true).SetText(text)
+	tv.SetBorder(true).SetTitle(" " + tview.Escape(title) + " — Esc закрыть ")
+	tv.SetBorderColor(tcell.GetColor(colorBorderActive))
+	tv.SetTitleColor(tcell.GetColor(colorTitleActive))
+	tv.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Key() == tcell.KeyEscape {
+			u.pages.RemovePage("viewer")
+			u.app.SetFocus(u.messages)
+			return nil
 		}
-		if s.I {
-			flags += "i"
-		}
-		if s.S {
-			flags += "s"
-		}
-		if s.Code {
-			fg = "#e0af68" // код — янтарным
-		}
-		if s.URL != "" {
-			fg = "#7aa2f7" // ссылка — синим (без подчёркивания: в tcell оно не
-			// сбрасывается тегом [-:-:-] и «протекает» на весь текст)
-		}
-		if fg != "" || flags != "" {
-			// [-::-] сбрасывает цвет/начертание, но сохраняет фон зебры.
-			fmt.Fprintf(&b, "[%s::%s]%s[-::-]", fg, flags, tview.Escape(s.Text))
-		} else {
-			b.WriteString(tview.Escape(s.Text))
-		}
-		// Для скрытой ссылки (TextURL) показываем сам адрес.
-		if s.URL != "" && s.URL != s.Text && !strings.HasPrefix(s.URL, "mailto:") {
-			fmt.Fprintf(&b, " [#565f89](%s)[-]", tview.Escape(s.URL))
-		}
-	}
-	return b.String()
+		return ev
+	})
+	u.pages.AddPage("viewer", tv, true, true)
+	u.app.SetFocus(tv)
 }
 
 func (u *ui) renderDetails() {
@@ -1114,10 +1005,8 @@ func (u *ui) selectMsg(i int) {
 	}
 	u.msgSel = i
 	u.msgElem = 0 // при смене сообщения навигация по элементам — с начала
-	// Перерисовываем: выбранное сообщение рендерится одноцветным (полоса-курсор),
-	// поэтому при смене выбора нужно пересобрать текст, а не только подсветку.
-	u.renderMessages()
 	u.showElementHints()
+	// Отрисовку (полосу-курсор и прокрутку к выбранному) сделает примитов messages.
 }
 
 func (u *ui) selectedIndices() []int {
@@ -1193,7 +1082,6 @@ func (u *ui) toggleSelect() {
 	} else {
 		u.selected[u.msgSel] = true
 	}
-	u.renderMessages()
 }
 
 // msgElement — навигационный элемент сообщения (Tab): текст, ссылка, вложение.
@@ -1465,24 +1353,25 @@ func (u *ui) reloadHistory(d telegram.Dialog) {
 	}
 	u.app.QueueUpdateDraw(func() {
 		if u.sameChat(d) {
-			u.history = h
-			u.renderMessages()
+			u.setHistory(h)
 		}
 	})
 }
 
 // showHelp показывает окно справки по горячим клавишам.
 func (u *ui) showHelp() {
-	help := "Tab — фокус между панелями\n" +
-		"Ctrl+B — панель чатов   Ctrl+E — панель деталей\n" +
-		"Enter — открыть чат / отправить   Alt+Enter — перенос строки\n" +
+	help := "Чаты: ←→ свернуть/развернуть, Enter — открыть (список прячется)\n" +
+		"Ctrl+B — список чатов   Alt+I — панель информации\n" +
 		"\n" +
-		"В панели сообщений:\n" +
-		"↑↓/Home/End — выбор   c — копировать   r — цитировать\n" +
-		"Space — пометить   y — копировать выбранные   d — удалить\n" +
-		"o — открыть вложение во внешней программе\n" +
+		"Сообщения:\n" +
+		"↑↓/Home/End — выбор сообщения   Esc — назад к чатам\n" +
+		"Tab/Shift+Tab — элемент сообщения (текст/ссылка/вложение)\n" +
+		"c — копировать   r — цитировать   d — удалить   Spc — пометить\n" +
+		"o — открыть: ссылку в браузере / скачать вложение (повторно — пауза)\n" +
+		"F3 — полный текст сообщения   Enter — перейти к вводу\n" +
 		"\n" +
-		"F1 — эта справка   F10 / Ctrl+C — выход"
+		"Ввод: Enter — отправить, Alt+Enter — перенос, Esc — к сообщениям\n" +
+		"F1 — справка   F10 — меню   Alt+X / Ctrl+C — выход"
 	u.showDialog("Горячие клавиши", help, []string{"OK"}, nil)
 }
 
