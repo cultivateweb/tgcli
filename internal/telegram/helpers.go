@@ -89,6 +89,9 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	d.Ref = peerRefFrom(e.Peer)
 	if dlg, ok := e.Dialog.(*tg.Dialog); ok {
 		d.Unread = dlg.UnreadCount
+		if mu, ok := dlg.NotifySettings.GetMuteUntil(); ok && int64(mu) > time.Now().Unix() {
+			d.Muted = true
+		}
 	}
 	d.Title, d.Kind = peerTitleKind(e.Peer, e.Entities)
 	d.Title = sanitize(d.Title)

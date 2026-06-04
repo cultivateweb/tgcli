@@ -38,6 +38,7 @@ var kindOrder = []struct{ key, label string }{
 // Цвета по типам чатов (выбор пользователя). «Мои» — те же оттенки, что и
 // обычные группы/каналы.
 var kindColor = map[string]string{
+	"unread":     "#ff9e64", // закладка «Непрочитанные»
 	"self":       "#7dcfff",
 	"user":       "#9ece6a",
 	"bot":        "#e0af68",
@@ -148,6 +149,10 @@ const (
 	colorMenuAccel = "#ffff55" // горячая буква пункта (акселератор) — жёлтый
 	colorShadow    = "#000000" // тень окон и выпадающих меню
 	colorScroll    = "#3a8a99" // скроллбар панелей (стрелки, дорожка, ползунок)
+
+	// Зебра в панели сообщений: фон чередуется у соседних сообщений.
+	colorMsgBg    = "#0000a8" // чётные — базовый синий
+	colorMsgBgAlt = "#000086" // нечётные — чуть темнее
 )
 
 // applyTheme задаёт палитру в стиле Turbo Pascal: насыщенный синий фон,
@@ -248,7 +253,12 @@ func (u *ui) build() {
 			return
 		}
 		u.openChat(*d)
-		u.app.SetFocus(u.messages) // Enter на чате/теме → панель сообщений
+		// Enter на чате/теме → прячем список чатов и уходим в сообщения.
+		if u.showTree {
+			u.showTree = false
+			u.rebuildMid()
+		}
+		u.app.SetFocus(u.messages)
 	})
 	// ←/→ — свернуть/развернуть закладку (узел дерева). Esc — выход из дерева
 	// не предусмотрен (это крайняя левая панель). ↑↓ оставляем дереву.
@@ -323,10 +333,12 @@ func (u *ui) build() {
 				u.app.SetFocus(u.input)
 			}
 			return nil
-		case tcell.KeyEscape: // Esc → обратно к списку чатов
-			if u.showTree {
-				u.app.SetFocus(u.tree)
+		case tcell.KeyEscape: // Esc → показать список чатов и вернуться в него
+			if !u.showTree {
+				u.showTree = true
+				u.rebuildMid()
 			}
+			u.app.SetFocus(u.tree)
 			return nil
 		}
 		switch ev.Rune() {
@@ -718,36 +730,56 @@ func (u *ui) buildTree() {
 	root := tview.NewTreeNode("Закладки").SetSelectable(false).
 		SetColor(tcell.GetColor("#ffffff"))
 
+	// «Непрочитанные» — сводная закладка сверху: чаты с непрочитанными, не в муте.
+	var unread []telegram.Dialog
+	for _, d := range u.dialogs {
+		if d.Unread > 0 && !d.Muted {
+			unread = append(unread, d)
+		}
+	}
+	if len(unread) > 0 {
+		cat := tview.NewTreeNode(treeLine("● Непрочитанные", fmt.Sprintf("(%d)", len(unread)), treeAvail(1))).
+			SetColor(tcell.GetColor(kindColor["unread"])).SetSelectable(true).SetExpanded(true)
+		for i := range unread {
+			cat.AddChild(u.chatNode(unread[i]))
+		}
+		root.AddChild(cat)
+	}
+
 	for _, g := range kindOrder {
 		list := groups[g.key]
 		if len(list) == 0 {
 			continue
 		}
-		col := tcell.GetColor(kindColor[g.key])
 		cat := tview.NewTreeNode(treeLine(g.label, fmt.Sprintf("(%d)", len(list)), treeAvail(1))).
-			SetColor(col).SetSelectable(true).SetExpanded(g.key == "self")
+			SetColor(tcell.GetColor(kindColor[g.key])).SetSelectable(true).SetExpanded(g.key == "self")
 		for i := range list {
-			d := list[i]
-			count := ""
-			if d.Unread > 0 {
-				count = fmt.Sprintf("(%d)", d.Unread)
-			}
-			chatCol := col
-			if c, ok := kindColor[d.Kind]; ok { // супергруппы — своим цветом
-				chatCol = tcell.GetColor(c)
-			}
-			node := tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
-				SetReference(&d).SetColor(chatCol)
-			if d.Forum { // форум раскрывается в темы (лениво) — заглушка для стрелки
-				node.SetExpanded(false)
-				node.AddChild(tview.NewTreeNode("  …").SetSelectable(false).
-					SetColor(tcell.GetColor(colorInactive)))
-			}
-			cat.AddChild(node)
+			cat.AddChild(u.chatNode(list[i]))
 		}
 		root.AddChild(cat)
 	}
 	u.tree.SetRoot(root).SetCurrentNode(root)
+}
+
+// chatNode строит узел-лист чата второго уровня: цвет по типу, счётчик
+// непрочитанных справа; форум получает заглушку «…» для ленивой подгрузки тем.
+func (u *ui) chatNode(d telegram.Dialog) *tview.TreeNode {
+	count := ""
+	if d.Unread > 0 {
+		count = fmt.Sprintf("(%d)", d.Unread)
+	}
+	col := tcell.GetColor("#ffffff")
+	if c, ok := kindColor[d.Kind]; ok {
+		col = tcell.GetColor(c)
+	}
+	node := tview.NewTreeNode(treeLine(d.Title, count, treeAvail(2))).
+		SetReference(&d).SetColor(col)
+	if d.Forum {
+		node.SetExpanded(false)
+		node.AddChild(tview.NewTreeNode("  …").SetSelectable(false).
+			SetColor(tcell.GetColor(colorInactive)))
+	}
+	return node
 }
 
 func (u *ui) openChat(d telegram.Dialog) {
@@ -916,6 +948,8 @@ func (u *ui) buildMessage(i int) string {
 	ts := msg.Date.Format("15:04")
 	var b strings.Builder
 	if i == u.msgSel {
+		// Базовый фон — чтобы инверсия-курсор была чистой полосой.
+		b.WriteString("[:" + colorMsgBg + ":]")
 		if u.selected[i] {
 			b.WriteString("✓ ")
 		}
@@ -932,13 +966,19 @@ func (u *ui) buildMessage(i int) string {
 		}
 		return b.String()
 	}
+	// Зебра: фон зависит от чётности; сбросы ниже сохраняют фон ([-] и [-::-]).
+	bg := colorMsgBg
+	if i%2 == 1 {
+		bg = colorMsgBgAlt
+	}
+	b.WriteString("[:" + bg + ":]")
 	if u.selected[i] {
 		b.WriteString("[#e0af68]✓ [-]")
 	}
 	if msg.Out {
 		fmt.Fprintf(&b, "[#565f89]%s[-] [#9ece6a]→[-] ", ts)
 	} else {
-		fmt.Fprintf(&b, "[#565f89]%s[-] [#7dcfff::b]%s:[-:-:-] ", ts, tview.Escape(msg.Author))
+		fmt.Fprintf(&b, "[#565f89]%s[-] [#7dcfff::b]%s:[-::-] ", ts, tview.Escape(msg.Author))
 	}
 	body := renderBody(msg)
 	b.WriteString(body)
@@ -979,7 +1019,8 @@ func renderBody(msg telegram.HistoryMessage) string {
 			// сбрасывается тегом [-:-:-] и «протекает» на весь текст)
 		}
 		if fg != "" || flags != "" {
-			fmt.Fprintf(&b, "[%s::%s]%s[-:-:-]", fg, flags, tview.Escape(s.Text))
+			// [-::-] сбрасывает цвет/начертание, но сохраняет фон зебры.
+			fmt.Fprintf(&b, "[%s::%s]%s[-::-]", fg, flags, tview.Escape(s.Text))
 		} else {
 			b.WriteString(tview.Escape(s.Text))
 		}

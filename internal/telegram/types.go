@@ -29,6 +29,7 @@ type Dialog struct {
 	Preview string    `json:"preview"`
 	CanSend bool      `json:"can_send"` // можно ли писать в этот чат
 	Mine    bool      `json:"mine"`     // я создатель (для групп/каналов)
+	Muted   bool      `json:"muted"`    // уведомления выключены (в муте)
 	Forum   bool      `json:"forum"`    // супергруппа-форум (есть темы)
 	Ref     PeerRef   `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
 
