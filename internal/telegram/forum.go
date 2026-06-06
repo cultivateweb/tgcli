@@ -45,7 +45,9 @@ func (s *Session) HistoryByTopic(ctx context.Context, peer tg.InputPeerClass, to
 	var out []HistoryMessage
 	iter := messages.NewQueryBuilder(s.api).GetReplies(peer).MsgID(topicID).BatchSize(limit).Iter()
 	for len(out) < limit && iter.Next(ctx) {
-		out = append(out, historyFromElem(iter.Value()))
+		if hm, ok := historyFromElem(iter.Value()); ok {
+			out = append(out, hm)
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, err

@@ -117,12 +117,15 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	return d
 }
 
-// historyFromElem превращает элемент истории в HistoryMessage.
-func historyFromElem(e messages.Elem) HistoryMessage {
+// historyFromElem превращает элемент истории в HistoryMessage. ok=false для
+// служебных/пустых элементов (вход-выход участников, закреп, создание чата,
+// видеочат и т.п.) — их не показываем, иначе в ленте появляются пустые строки
+// с нулевой датой «00:04 : ».
+func historyFromElem(e messages.Elem) (HistoryMessage, bool) {
 	var hm HistoryMessage
 	msg, ok := e.Msg.(*tg.Message)
 	if !ok {
-		return hm
+		return hm, false
 	}
 	hm.ID = int64(msg.ID)
 	hm.Date = time.Unix(int64(msg.Date), 0)
@@ -131,7 +134,7 @@ func historyFromElem(e messages.Elem) HistoryMessage {
 	hm.Spans = spansFrom(msg.Message, msg.Entities)
 	hm.Media = mediaFrom(msg)
 	hm.Author = sanitize(messageAuthor(msg, e.Entities, e.Peer))
-	return hm
+	return hm, true
 }
 
 // canSend определяет, может ли пользователь писать в чат. Для broadcast-каналов

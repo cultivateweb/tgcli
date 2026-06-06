@@ -442,7 +442,9 @@ func (s *Session) HistoryByPeer(ctx context.Context, peer tg.InputPeerClass, lim
 	var out []HistoryMessage
 	iter := messages.NewQueryBuilder(s.api).GetHistory(peer).BatchSize(limit).Iter()
 	for len(out) < limit && iter.Next(ctx) {
-		out = append(out, historyFromElem(iter.Value()))
+		if hm, ok := historyFromElem(iter.Value()); ok {
+			out = append(out, hm)
+		}
 	}
 	if err := iter.Err(); err != nil {
 		return nil, err
