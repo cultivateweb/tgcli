@@ -115,10 +115,7 @@ func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, cfg *confi
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
 
-	saved := telegram.Dialog{Title: "Saved Messages", Kind: "user", CanSend: true, Ref: telegram.PeerRef{Type: "self"}}
-	saved.Peer = saved.Ref.InputPeer()
-	u.openChat(saved)
-
+	// Стартуем на полноэкранной панели «Чаты»; переписка открывается по Enter.
 	go u.loadDialogs()
 	if updates != nil {
 		go u.listenUpdates(updates)
@@ -211,7 +208,12 @@ func (u *ui) build() {
 		return u.tree.GetInnerRect()
 	})
 	markFocus(u.tree,
-		func() { u.lastPanel = u.tree; u.dismissMenuIfOpen(); u.tree.SetTitle(focusTitle(titleTree)) },
+		func() {
+			u.lastPanel = u.tree
+			u.dismissMenuIfOpen()
+			u.status.SetText(u.treeHints())
+			u.tree.SetTitle(focusTitle(titleTree))
+		},
 		func() { u.tree.SetTitle(titleTree) })
 	u.tree.SetSelectedFunc(func(node *tview.TreeNode) {
 		ref := node.GetReference()
@@ -233,11 +235,19 @@ func (u *ui) build() {
 		}
 		u.app.SetFocus(u.messages)
 	})
-	// ←/→ — свернуть/развернуть закладку (узел дерева). Esc — выход из дерева
-	// не предусмотрен (это крайняя левая панель). ↑↓ оставляем дереву.
+	// ←/→ — свернуть/развернуть закладку (узел дерева). Esc возвращает к открытой
+	// переписке; пока ни один чат не открыт, делать нечего — Esc игнорируется.
+	// ↑↓ оставляем дереву.
 	u.tree.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		cur := u.tree.GetCurrentNode()
 		switch ev.Key() {
+		case tcell.KeyEscape:
+			if u.open != nil {
+				u.showTree = false
+				u.rebuildMid()
+				u.app.SetFocus(u.messages)
+			}
+			return nil
 		case tcell.KeyRight:
 			if cur != nil {
 				if ref := cur.GetReference(); ref != nil {
@@ -277,10 +287,7 @@ func (u *ui) build() {
 			u.status.SetText(msgHints())
 			u.messages.SetTitle(focusTitle(u.msgTitle))
 		},
-		func() {
-			u.status.SetText(statusHints())
-			u.messages.SetTitle(u.msgTitle)
-		})
+		func() { u.messages.SetTitle(u.msgTitle) })
 	u.messages.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		switch ev.Key() {
 		case tcell.KeyUp:
@@ -346,7 +353,12 @@ func (u *ui) build() {
 	u.input.SetPlaceholder("Сообщение…  (Enter — отправить, Alt+Enter — перенос строки)")
 	u.input.SetBorder(true).SetTitle(titleInput)
 	markFocus(u.input,
-		func() { u.lastPanel = u.input; u.dismissMenuIfOpen(); u.input.SetTitle(focusTitle(titleInput)) },
+		func() {
+			u.lastPanel = u.input
+			u.dismissMenuIfOpen()
+			u.status.SetText(inputHints())
+			u.input.SetTitle(focusTitle(titleInput))
+		},
 		func() { u.input.SetTitle(titleInput) })
 	u.input.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt == 0 {
@@ -377,13 +389,18 @@ func (u *ui) build() {
 		return u.details.GetInnerRect()
 	})
 	markFocus(u.details,
-		func() { u.lastPanel = u.details; u.dismissMenuIfOpen(); u.details.SetTitle(focusTitle(u.detailsTitle)) },
+		func() {
+			u.lastPanel = u.details
+			u.dismissMenuIfOpen()
+			u.status.SetText(detailsHints())
+			u.details.SetTitle(focusTitle(u.detailsTitle))
+		},
 		func() { u.details.SetTitle(u.detailsTitle) })
 	u.details.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Rune() == 'c' {
 			i := u.details.GetCurrentItem()
 			if i >= 0 && i < len(u.detailValues) {
-				u.copyToClipboard(u.detailValues[i], "["+theme.Success+"]Скопировано[-]  "+statusHints())
+				u.copyToClipboard(u.detailValues[i], "["+theme.Success+"]Скопировано[-]  "+detailsHints())
 			}
 			return nil
 		}
@@ -504,12 +521,15 @@ func (u *ui) root() *tview.Flex {
 		AddItem(u.status, 1, 0, false)
 }
 
-// rebuildMid пересобирает среднюю строку из видимых панелей (чаты | центр | детали).
+// rebuildMid пересобирает среднюю строку. Панели «Чаты» и «Сообщения» —
+// взаимоисключающие полноэкранные виды: открытый список чатов занимает всю
+// ширину, переписка скрыта (и наоборот). «Информация» приклеивается справа к
+// переписке.
 func (u *ui) rebuildMid() {
 	u.mid.Clear()
 	if u.showTree {
-		// Пропорция 1:1 с центром → панель «Чаты» примерно в половину ширины.
 		u.mid.AddItem(u.tree, 0, 1, false)
+		return
 	}
 	u.mid.AddItem(u.center, 0, 1, false)
 	if u.showDetails {
@@ -547,11 +567,14 @@ func (u *ui) cycleFocusStep(step int) {
 }
 
 func (u *ui) toggleTree() {
+	if u.showTree && u.open == nil {
+		return // переписка ещё не открыта — переключаться не на что
+	}
 	u.showTree = !u.showTree
 	u.rebuildMid()
 	if u.showTree {
 		u.app.SetFocus(u.tree)
-	} else if u.app.GetFocus() == u.tree {
+	} else {
 		u.app.SetFocus(u.messages)
 	}
 }
@@ -567,22 +590,23 @@ func (u *ui) toggleDetails() {
 	}
 }
 
-// toggleInfo открывает/закрывает панель «Информация» (Alt+I) с переносом фокуса:
-// при открытии фокус уходит в неё, при закрытии — обратно к сообщениям/чатам.
+// toggleInfo открывает/закрывает панель «Информация» (Alt+I). Информация
+// относится к открытой переписке, поэтому показывается рядом с ней (вид «Чаты»
+// при этом сменяется на переписку) и недоступна, пока чат не открыт.
 func (u *ui) toggleInfo() {
+	if u.open == nil {
+		return // нет открытого чата — нечего показывать
+	}
 	u.showDetails = !u.showDetails
 	if u.showDetails {
+		u.showTree = false
 		u.renderDetails()
 		u.rebuildMid()
 		u.app.SetFocus(u.details)
 		return
 	}
 	u.rebuildMid()
-	if u.showTree {
-		u.app.SetFocus(u.tree)
-	} else {
-		u.app.SetFocus(u.messages)
-	}
+	u.app.SetFocus(u.messages)
 }
 
 // ── Темы ───────────────────────────────────────────────────────────────────
@@ -955,7 +979,7 @@ func (u *ui) sendMessage(d telegram.Dialog, text string) {
 			return
 		}
 		u.input.SetText("", false)
-		u.status.SetText(statusHints())
+		u.status.SetText(inputHints())
 	})
 	if err == nil {
 		go u.reloadHistory(d)
@@ -1507,6 +1531,37 @@ func msgHints() string {
 	return borlandBar([][3]string{
 		{"tab", "Tab", "Элемент"}, {"copy", "c", "Копир"}, {"quote", "r", "Цитата"},
 		{"del", "d", "Удал"}, {"mark", "Spc", "Выбор"}, {"open", "o", "Откр"},
-		{"menu", "F10", "Меню"},
+		{"back", "Esc", "Чаты"}, {"menu", "F10", "Меню"},
+	})
+}
+
+// treeHints — подсказки панели «Чаты». «К переписке» (Esc) показывается, только
+// когда есть открытый чат, к которому можно вернуться.
+func (u *ui) treeHints() string {
+	items := [][3]string{
+		{"sel", "Enter", "Открыть"}, {"nav", "↑↓", "Выбор"}, {"exp", "←→", "Свернуть"},
+	}
+	if u.open != nil {
+		items = append(items, [3]string{"back", "Esc", "К переписке"})
+	}
+	items = append(items,
+		[3]string{"theme", "F8", "Тема"},
+		[3]string{"menu", "F10", "Меню"},
+		[3]string{"quit", "Alt+X", "Выход"})
+	return borlandBar(items)
+}
+
+// inputHints — подсказки панели «Ввод».
+func inputHints() string {
+	return borlandBar([][3]string{
+		{"send", "Enter", "Отпр"}, {"nl", "Alt+↵", "Перенос"},
+		{"back", "Esc", "К сообщениям"}, {"menu", "F10", "Меню"},
+	})
+}
+
+// detailsHints — подсказки панели «Информация».
+func detailsHints() string {
+	return borlandBar([][3]string{
+		{"copy", "c", "Копир"}, {"info", "Alt+I", "Закрыть"}, {"menu", "F10", "Меню"},
 	})
 }

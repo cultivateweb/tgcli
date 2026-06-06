@@ -277,6 +277,8 @@ func (u *ui) runStatusAction(id string) {
 		if text != "" && u.open != nil && u.open.CanSend {
 			go u.sendMessage(*u.open, text)
 		}
+	case "theme":
+		u.cycleTheme()
 	case "quit":
 		u.app.Stop()
 	case "copy":
