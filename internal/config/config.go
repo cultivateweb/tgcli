@@ -32,6 +32,10 @@ type Config struct {
 	APIHash string `json:"api_hash,omitempty"`
 	Phone   string `json:"phone,omitempty"`
 
+	// Theme — имя выбранной цветовой темы TUI (Theme.Name). Пусто — тема по
+	// умолчанию (Tokyo Night).
+	Theme string `json:"theme,omitempty"`
+
 	// path — фактический путь, откуда конфиг загружен; нужен для Save.
 	// Не сериализуется.
 	path string `json:"-"`

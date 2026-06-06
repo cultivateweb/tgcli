@@ -34,8 +34,8 @@ func (s shadowed) Draw(screen tcell.Screen) {
 func drawShadow(screen tcell.Screen, x, y, w, h int) {
 	sw, sh := screen.Size()
 	style := tcell.StyleDefault.
-		Background(tcell.GetColor(colorShadow)).
-		Foreground(tcell.GetColor("#555555"))
+		Background(tcell.GetColor(theme.Shadow)).
+		Foreground(tcell.GetColor(theme.ShadowFg))
 	dim := func(cx, cy int) {
 		if cx < 0 || cy < 0 || cx >= sw || cy >= sh {
 			return
@@ -65,16 +65,26 @@ type topMenu struct {
 // menus описывает структуру меню. Горячие буквы (первая буква заголовка)
 // уникальны: Ф, В, П, С — их ловит Alt+буква.
 func (u *ui) menus() []topMenu {
+	view := []menuItem{
+		{"Панель чатов", "^B", u.toggleTree},
+		{"Информация", "Alt+I", u.toggleInfo},
+	}
+	for i := range themes { // пункты выбора темы; активная помечена ✓
+		t := themes[i]
+		label := t.Name
+		key := ""
+		if t.Name == theme.Name {
+			key = "✓"
+		}
+		view = append(view, menuItem{label, key, func() { u.setTheme(t) }})
+	}
 	return []topMenu{
 		{"Файл", []menuItem{
 			{"Справка", "F1", u.showHelp},
 			{"О программе", "", u.showAbout},
 			{"Выход", "Alt+X", u.app.Stop},
 		}},
-		{"Вид", []menuItem{
-			{"Панель чатов", "^B", u.toggleTree},
-			{"Информация", "Alt+I", u.toggleInfo},
-		}},
+		{"Вид", view},
 		{"Правка", []menuItem{
 			{"Копировать", "c", u.copyMsg},
 			{"Цитировать", "r", u.quoteMsg},
@@ -100,9 +110,9 @@ func (u *ui) renderMenuBar() {
 	for i, m := range u.menus() {
 		u.menuX = append(u.menuX, col)
 		r := []rune(m.title)
-		// регион t{i}: пробел, красная горячая буква, остаток, пробел
-		fmt.Fprintf(&b, `["t%d"] [#b00000::b]%s[#101010::-]%s [""]  `,
-			i, string(r[0]), string(r[1:]))
+		// регион t{i}: пробел, акцентная горячая буква, остаток, пробел
+		fmt.Fprintf(&b, `["t%d"] [%s::b]%s[%s::-]%s [""]  `,
+			i, theme.BarAccel, string(r[0]), theme.BarFg, string(r[1:]))
 		col += 1 + len(r) + 1 + 2 // пробел + заголовок + пробел + 2 разделителя
 	}
 	u.header.SetText(b.String())
@@ -135,11 +145,11 @@ func (u *ui) openMenu(i int) {
 	width += 3 // зазор между подписью и клавишей
 
 	list := tview.NewList().ShowSecondaryText(false)
-	list.SetBorder(true).SetBorderColor(tcell.GetColor(colorBorderActive))
+	list.SetBorder(true).SetBorderColor(tcell.GetColor(theme.BorderActive))
 	list.SetHighlightFullLine(true).SetWrapAround(true)
-	list.SetMainTextColor(tcell.GetColor(colorMenuText))
-	list.SetSelectedTextColor(tcell.GetColor(colorMenuSelFg))
-	list.SetSelectedBackgroundColor(tcell.GetColor(colorMenuSelBg))
+	list.SetMainTextColor(tcell.GetColor(theme.MenuText))
+	list.SetSelectedTextColor(tcell.GetColor(theme.MenuSelFg))
+	list.SetSelectedBackgroundColor(tcell.GetColor(theme.MenuSelBg))
 	for _, it := range m.items {
 		list.AddItem(menuItemLine(it, width), "", 0, nil)
 	}
@@ -203,7 +213,7 @@ func menuItemLine(it menuItem, width int) string {
 	if len(r) == 0 {
 		return line
 	}
-	return fmt.Sprintf("[%s::b]%s[-:-:-]%s", colorMenuAccel, string(r[0]), string(r[1:]))
+	return fmt.Sprintf("[%s::b]%s[-:-:-]%s", theme.MenuAccel, string(r[0]), string(r[1:]))
 }
 
 // setBarHighlight меняет визуальную подсветку меню-бара, не вызывая реакцию

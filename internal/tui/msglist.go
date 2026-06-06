@@ -43,7 +43,7 @@ func (m *msgList) Draw(screen tcell.Screen) {
 	u := m.ui
 	if len(u.history) == 0 {
 		if m.placeholder != "" {
-			tview.Print(screen, m.placeholder, x, y, w, tview.AlignLeft, tcell.GetColor("#565f89"))
+			tview.Print(screen, m.placeholder, x, y, w, tview.AlignLeft, tcell.GetColor(theme.TextDim))
 		}
 		return
 	}
@@ -89,7 +89,7 @@ func (m *msgList) layout(w, h int) (rows []mrow, selStart, selEnd int) {
 		grows := wrapGlyphs(u.messageGlyphs(i), w)
 		if len(grows) > maxLines {
 			grows = grows[:maxLines-1]
-			grows = append(grows, glyphsOf("  … (F3 — открыть целиком)", tcell.StyleDefault.Foreground(tcell.GetColor("#565f89"))))
+			grows = append(grows, glyphsOf("  … (F3 — открыть целиком)", tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim))))
 		}
 		start := len(rows)
 		for _, gr := range grows {
@@ -105,12 +105,12 @@ func (m *msgList) layout(w, h int) (rows []mrow, selStart, selEnd int) {
 // bgFor — фон сообщения: выбранное — полоса-курсор, остальные — зебра по чётности.
 func (m *msgList) bgFor(i int) tcell.Color {
 	if i == m.ui.msgSel {
-		return tcell.GetColor(colorMsgSel)
+		return tcell.GetColor(theme.MsgSel)
 	}
 	if i%2 == 1 {
-		return tcell.GetColor(colorMsgBgAlt)
+		return tcell.GetColor(theme.MsgBgAlt)
 	}
-	return tcell.GetColor(colorMsgBg)
+	return tcell.GetColor(theme.MsgBg)
 }
 
 func drawMRow(screen tcell.Screen, x, y, w int, row mrow) {
@@ -203,11 +203,11 @@ func (u *ui) messageGlyphs(i int) []mglyph {
 	var g []mglyph
 	push := func(s string, st tcell.Style) { g = append(g, glyphsOf(s, st)...) }
 
-	push(msg.Date.Format("15:04")+" ", tcell.StyleDefault.Foreground(tcell.GetColor("#565f89")))
+	push(msg.Date.Format("15:04")+" ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim)))
 	if msg.Out {
-		push("→ ", tcell.StyleDefault.Foreground(tcell.GetColor("#9ece6a")))
+		push("→ ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgOut)))
 	} else {
-		push(msg.Author+": ", tcell.StyleDefault.Foreground(tcell.GetColor("#7dcfff")).Bold(true))
+		push(msg.Author+": ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgAuthor)).Bold(true))
 	}
 	yellow := tcell.StyleDefault.Foreground(tview.Styles.PrimaryTextColor)
 	if len(msg.Spans) == 0 {
@@ -225,16 +225,16 @@ func (u *ui) messageGlyphs(i int) []mglyph {
 				st = st.StrikeThrough(true)
 			}
 			if s.Code {
-				st = tcell.StyleDefault.Foreground(tcell.GetColor("#e0af68"))
+				st = tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgCode))
 			}
 			if s.URL != "" {
-				st = tcell.StyleDefault.Foreground(tcell.GetColor("#7aa2f7")).Underline(true)
+				st = tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgLink)).Underline(true)
 			}
 			push(s.Text, st)
 		}
 	}
 	if msg.Media != nil {
-		push("\n📎 "+msg.Media.Label(), tcell.StyleDefault.Foreground(tcell.GetColor("#e0af68")))
+		push("\n📎 "+msg.Media.Label(), tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgCode)))
 	}
 	return g
 }

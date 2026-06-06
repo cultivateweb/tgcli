@@ -23,6 +23,7 @@ import (
 	"github.com/rivo/tview"
 
 	"github.com/cultivateweb/tgcli/internal/cache"
+	"github.com/cultivateweb/tgcli/internal/config"
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
@@ -35,20 +36,6 @@ var kindOrder = []struct{ key, label string }{
 	{"mygroup", "Мои группы"},
 	{"channel", "Каналы"},
 	{"mychannel", "Мои каналы"},
-}
-
-// Цвета по типам чатов (выбор пользователя). «Мои» — те же оттенки, что и
-// обычные группы/каналы.
-var kindColor = map[string]string{
-	"unread":     "#ff9e64", // закладка «Непрочитанные»
-	"self":       "#7dcfff",
-	"user":       "#9ece6a",
-	"bot":        "#e0af68",
-	"group":      "#7aa2f7",
-	"supergroup": "#2ac3de", // супергруппы — отдельным цветом среди групп
-	"mygroup":    "#7aa2f7",
-	"channel":    "#bb9af7",
-	"mychannel":  "#bb9af7",
 }
 
 func groupKey(d telegram.Dialog) string {
@@ -77,6 +64,7 @@ type ui struct {
 	ctx     context.Context
 	sess    *telegram.Session
 	cache   *cache.Cache
+	cfg     *config.Config
 	version string
 
 	app      *tview.Application
@@ -114,10 +102,14 @@ type ui struct {
 	treeWidth   int                 // текущая внутренняя ширина панели «Чаты» (для выравнивания)
 }
 
-// Run строит и запускает интерфейс. c и updates могут быть nil.
-func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-chan telegram.NewMessage, version string) error {
-	applyTheme()
-	u := &ui{ctx: ctx, sess: sess, cache: c, version: version,
+// Run строит и запускает интерфейс. c, cfg и updates могут быть nil.
+func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, cfg *config.Config, updates <-chan telegram.NewMessage, version string) error {
+	name := ""
+	if cfg != nil {
+		name = cfg.Theme
+	}
+	applyTheme(themeByName(name)) // сохранённая тема или tokyoNight по умолчанию
+	u := &ui{ctx: ctx, sess: sess, cache: c, cfg: cfg, version: version,
 		app: tview.NewApplication(), selected: map[int]bool{}, treeWidth: 48,
 		forumLoaded: map[string]bool{}, downloads: map[int64]*download{}, menuActive: -1}
 	u.build()
@@ -139,48 +131,14 @@ func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, updates <-
 	return u.app.Run()
 }
 
-// Цвета рамок панелей. Символы рамки (одинарная/двойная) tview переключает сам
-// по фокусу; здесь задаётся только цвет рамки и заголовка.
-const (
-	colorBorderActive = "#5ec4d6" // активная панель — яркая голубая рамка
-	colorTitleActive  = "#ffffff" // активная панель — белый заголовок
-	colorInactive     = "#888888" // неактивные панели — серая рамка и заголовок
-
-	// Меню и окна в стиле Turbo Vision.
-	colorMenuText  = "#ffffff" // обычный текст пункта меню
-	colorMenuSelBg = "#00a8a8" // выделенный пункт меню — cyan
-	colorMenuSelFg = "#000000" // текст выделенного пункта — чёрный
-	colorMenuAccel = "#ffff55" // горячая буква пункта (акселератор) — жёлтый
-	colorShadow    = "#000000" // тень окон и выпадающих меню
-	colorScroll    = "#3a8a99" // скроллбар панелей (стрелки, дорожка, ползунок)
-
-	// Зебра в панели сообщений: фон чередуется у соседних сообщений.
-	colorMsgBg    = "#0000a8" // чётные — базовый синий
-	colorMsgBgAlt = "#000086" // нечётные — чуть темнее
-	colorMsgSel   = "#1f5a6b" // выбранное — полоса-курсор во всю ширину
-)
-
-// applyTheme задаёт палитру в стиле Turbo Pascal: насыщенный синий фон,
-// жёлтый текст. Должна вызываться до создания виджетов.
-func applyTheme() {
-	hex := func(s string) tcell.Color { return tcell.GetColor(s) }
-	tview.Styles.PrimitiveBackgroundColor = hex("#0000a8")    // Borland blue
-	tview.Styles.ContrastBackgroundColor = hex("#008080")     // teal — выделение
-	tview.Styles.MoreContrastBackgroundColor = hex("#00a8a8") // cyan
-	tview.Styles.BorderColor = hex(colorInactive)             // по умолчанию панели неактивны
-	tview.Styles.TitleColor = hex(colorInactive)
-	tview.Styles.PrimaryTextColor = hex("#ffff55")   // жёлтый текст (Turbo)
-	tview.Styles.SecondaryTextColor = hex("#ffffff") // белый
-	tview.Styles.TertiaryTextColor = hex("#aaaaaa")  // серый
-	tview.Styles.InverseTextColor = hex("#0000a8")
-}
-
 // focusBox — общий интерфейс панелей tview (все встраивают *tview.Box).
 type focusBox interface {
 	SetBorderColor(tcell.Color) *tview.Box
 	SetTitleColor(tcell.Color) *tview.Box
+	SetBackgroundColor(tcell.Color) *tview.Box
 	SetFocusFunc(func()) *tview.Box
 	SetBlurFunc(func()) *tview.Box
+	HasFocus() bool
 }
 
 // Базовые (статические) заголовки панелей.
@@ -193,7 +151,7 @@ const (
 // Turbo Vision: тёмный текст на голубом фоне. Это однозначный признак фокуса,
 // не зависящий от того, отличает ли терминал двойную рамку (═) от одинарной (─).
 func focusTitle(base string) string {
-	return fmt.Sprintf("[#0000a8:%s:b]%s[-:-:-]", colorBorderActive, base)
+	return fmt.Sprintf("[%s:%s:b]%s[-:-:-]", theme.Inverse, theme.BorderActive, base)
 }
 
 // titledBox — панель, которой можно сменить заголовок и спросить про фокус.
@@ -217,15 +175,15 @@ func (u *ui) setTitle(b titledBox, base string) {
 // необязательные дополнительные действия (например, смена строки состояния).
 func markFocus(b focusBox, onFocus, onBlur func()) {
 	b.SetFocusFunc(func() {
-		b.SetBorderColor(tcell.GetColor(colorBorderActive))
-		b.SetTitleColor(tcell.GetColor(colorTitleActive))
+		b.SetBorderColor(tcell.GetColor(theme.BorderActive))
+		b.SetTitleColor(tcell.GetColor(theme.TitleActive))
 		if onFocus != nil {
 			onFocus()
 		}
 	})
 	b.SetBlurFunc(func() {
-		b.SetBorderColor(tcell.GetColor(colorInactive))
-		b.SetTitleColor(tcell.GetColor(colorInactive))
+		b.SetBorderColor(tcell.GetColor(theme.Inactive))
+		b.SetTitleColor(tcell.GetColor(theme.Inactive))
 		if onBlur != nil {
 			onBlur()
 		}
@@ -425,7 +383,7 @@ func (u *ui) build() {
 		if ev.Rune() == 'c' {
 			i := u.details.GetCurrentItem()
 			if i >= 0 && i < len(u.detailValues) {
-				u.copyToClipboard(u.detailValues[i], "[#9ece6a]Скопировано[-]  "+statusHints())
+				u.copyToClipboard(u.detailValues[i], "["+theme.Success+"]Скопировано[-]  "+statusHints())
 			}
 			return nil
 		}
@@ -435,7 +393,7 @@ func (u *ui) build() {
 	// Нижняя строка состояния в стиле Borland: серый фон, подсказки горячих
 	// клавиш; каждая подсказка — кликабельный регион (см. runStatusAction).
 	u.status = tview.NewTextView().SetDynamicColors(true).SetRegions(true)
-	u.status.SetBackgroundColor(hex("#aaaaaa"))
+	u.status.SetBackgroundColor(hex(theme.BarBg))
 	u.status.SetText(statusHints())
 	u.status.SetHighlightedFunc(func(added, _, _ []string) {
 		if len(added) == 0 {
@@ -503,6 +461,9 @@ func (u *ui) build() {
 		case tcell.KeyF1:
 			u.showHelp()
 			return nil
+		case tcell.KeyF8: // циклически сменить цветовую тему
+			u.cycleTheme()
+			return nil
 		case tcell.KeyCtrlB:
 			u.toggleTree()
 			return nil
@@ -521,7 +482,7 @@ func (u *ui) root() *tview.Flex {
 	u.rebuildMid()
 
 	u.header = tview.NewTextView().SetDynamicColors(true).SetRegions(true)
-	u.header.SetBackgroundColor(tcell.GetColor("#aaaaaa"))
+	u.header.SetBackgroundColor(tcell.GetColor(theme.BarBg))
 	// Клик мышью по пункту бара tview сам превращает в Highlight(region) — здесь
 	// открываем соответствующее меню. Программные смены подсветки (из openMenu/
 	// dismissMenu) помечены menuGuard и игнорируются, чтобы не было рекурсии.
@@ -624,6 +585,107 @@ func (u *ui) toggleInfo() {
 	}
 }
 
+// ── Темы ───────────────────────────────────────────────────────────────────
+
+// cycleTheme переключает на следующую тему из списka themes (F8).
+func (u *ui) cycleTheme() {
+	next := 0
+	for i, t := range themes {
+		if t.Name == theme.Name {
+			next = (i + 1) % len(themes)
+			break
+		}
+	}
+	u.setTheme(themes[next])
+}
+
+// setTheme делает t активной: обновляет палитру, перекрашивает уже созданные
+// виджеты, сохраняет выбор в конфиг и перерисовывает экран.
+func (u *ui) setTheme(t Theme) {
+	if t.Name == theme.Name {
+		return
+	}
+	u.dismissMenuIfOpen() // выпадающее меню перерисовывать ни к чему — закрываем
+	applyTheme(t)
+	u.restyle()
+	u.saveTheme(t.Name)
+	u.status.SetText("[" + theme.Success + "]Тема: " + t.Name + "[-]  " + statusHints())
+}
+
+// restyle переустанавливает цвета виджетов, захваченные из tview.Styles при их
+// создании (одной смены глобальной палитры для них мало). Примитивы, рисующие
+// себя сами (лента, диалоги, выпадающие меню), подхватят тему сами при
+// ближайшей перерисовке.
+func (u *ui) restyle() {
+	bg := tcell.GetColor(theme.BgPanel)
+	for _, b := range []focusBox{u.tree, u.input, u.details, u.messages} {
+		b.SetBackgroundColor(bg)
+		if b.HasFocus() { // рамка/заголовок — как в markFocus, но без смены фокуса
+			b.SetBorderColor(tcell.GetColor(theme.BorderActive))
+			b.SetTitleColor(tcell.GetColor(theme.TitleActive))
+		} else {
+			b.SetBorderColor(tcell.GetColor(theme.Inactive))
+			b.SetTitleColor(tcell.GetColor(theme.Inactive))
+		}
+	}
+
+	u.input.SetTextStyle(tcell.StyleDefault.Background(bg).Foreground(tcell.GetColor(theme.Text)))
+	u.input.SetPlaceholderStyle(tcell.StyleDefault.Background(bg).Foreground(tcell.GetColor(theme.TextDim)))
+	u.details.SetMainTextColor(tcell.GetColor(theme.Text)).
+		SetSecondaryTextColor(tcell.GetColor(theme.TextDim))
+
+	barBg := tcell.GetColor(theme.BarBg)
+	u.status.SetBackgroundColor(barBg)
+	u.header.SetBackgroundColor(barBg)
+	u.renderMenuBar() // акселераторы бара берут цвета из темы
+	u.recolorTree()   // перекрасить узлы дерева, не теряя раскрытие/выбор
+	// Перерисовку делает событийный цикл tview после обработчика (как в toggleTree).
+}
+
+// recolorTree перекрашивает узлы дерева под активную тему на месте — в отличие
+// от buildTree не сбрасывает раскрытие закладок и текущий выбор. Цвет узла-чата
+// берётся из его ссылки (Dialog.Kind), категории — по началу подписи.
+func (u *ui) recolorTree() {
+	root := u.tree.GetRoot()
+	if root == nil {
+		return
+	}
+	root.SetColor(tcell.GetColor(theme.TextBright))
+	catKey := map[string]string{"● Непрочитанные": "unread"}
+	for _, g := range kindOrder {
+		catKey[strings.TrimSpace(g.label)] = g.key
+	}
+	root.Walk(func(n, parent *tview.TreeNode) bool {
+		if n == root {
+			return true
+		}
+		if d, ok := n.GetReference().(*telegram.Dialog); ok { // чат или тема форума
+			n.SetColor(tcell.GetColor(kindColor(d.Kind)))
+			return true
+		}
+		if parent == root { // категория-закладка
+			text := strings.TrimSpace(n.GetText())
+			for label, key := range catKey {
+				if strings.HasPrefix(text, label) {
+					n.SetColor(tcell.GetColor(kindColor(key)))
+					return true
+				}
+			}
+		}
+		n.SetColor(tcell.GetColor(theme.Inactive)) // заглушки «…», «(нет тем)»
+		return true
+	})
+}
+
+// saveTheme запоминает выбранную тему в конфиге (в фоне, чтобы не блокировать UI).
+func (u *ui) saveTheme(name string) {
+	if u.cfg == nil {
+		return
+	}
+	u.cfg.Theme = name
+	go func() { _ = u.cfg.Save() }()
+}
+
 // ── Данные ─────────────────────────────────────────────────────────────────
 
 func (u *ui) loadDialogs() {
@@ -634,7 +696,7 @@ func (u *ui) loadDialogs() {
 	}
 	d, err := u.sess.Dialogs(u.ctx, 200, false)
 	if err != nil {
-		u.app.QueueUpdateDraw(func() { u.status.SetText("[#f7768e]Ошибка диалогов: " + tview.Escape(err.Error())) })
+		u.app.QueueUpdateDraw(func() { u.status.SetText("[" + theme.ErrorC + "]Ошибка диалогов: " + tview.Escape(err.Error())) })
 		return
 	}
 	if u.cache != nil {
@@ -721,7 +783,7 @@ func (u *ui) loadForum(node *tview.TreeNode, d telegram.Dialog) {
 		return
 	}
 	u.forumLoaded[d.Ref.Key()] = true
-	col := tcell.GetColor(kindColor["supergroup"])
+	col := tcell.GetColor(kindColor("supergroup"))
 	go func() {
 		topics, err := u.sess.ForumTopics(u.ctx, d.Peer, 100)
 		u.app.QueueUpdateDraw(func() {
@@ -733,7 +795,7 @@ func (u *ui) loadForum(node *tview.TreeNode, d telegram.Dialog) {
 			}
 			if len(topics) == 0 {
 				node.AddChild(tview.NewTreeNode("  (нет тем)").SetSelectable(false).
-					SetColor(tcell.GetColor(colorInactive)))
+					SetColor(tcell.GetColor(theme.Inactive)))
 				return
 			}
 			for _, t := range topics {
@@ -761,7 +823,7 @@ func (u *ui) buildTree() {
 		groups[groupKey(d)] = append(groups[groupKey(d)], d)
 	}
 	root := tview.NewTreeNode("Закладки").SetSelectable(false).
-		SetColor(tcell.GetColor("#ffffff"))
+		SetColor(tcell.GetColor(theme.TextBright))
 
 	// «Непрочитанные» — сводная закладка сверху: чаты с непрочитанными, не в муте.
 	var unread []telegram.Dialog
@@ -772,7 +834,7 @@ func (u *ui) buildTree() {
 	}
 	if len(unread) > 0 {
 		cat := tview.NewTreeNode(treeLine("● Непрочитанные", fmt.Sprintf("(%d)", len(unread)), u.treeAvail(1))).
-			SetColor(tcell.GetColor(kindColor["unread"])).SetSelectable(true).SetExpanded(true)
+			SetColor(tcell.GetColor(kindColor("unread"))).SetSelectable(true).SetExpanded(true)
 		for i := range unread {
 			cat.AddChild(u.chatNode(unread[i]))
 		}
@@ -785,7 +847,7 @@ func (u *ui) buildTree() {
 			continue
 		}
 		cat := tview.NewTreeNode(treeLine(g.label, fmt.Sprintf("(%d)", len(list)), u.treeAvail(1))).
-			SetColor(tcell.GetColor(kindColor[g.key])).SetSelectable(true).SetExpanded(g.key == "self")
+			SetColor(tcell.GetColor(kindColor(g.key))).SetSelectable(true).SetExpanded(g.key == "self")
 		for i := range list {
 			cat.AddChild(u.chatNode(list[i]))
 		}
@@ -801,16 +863,13 @@ func (u *ui) chatNode(d telegram.Dialog) *tview.TreeNode {
 	if d.Unread > 0 {
 		count = fmt.Sprintf("(%d)", d.Unread)
 	}
-	col := tcell.GetColor("#ffffff")
-	if c, ok := kindColor[d.Kind]; ok {
-		col = tcell.GetColor(c)
-	}
+	col := tcell.GetColor(kindColor(d.Kind))
 	node := tview.NewTreeNode(treeLine(d.Title, count, u.treeAvail(2))).
 		SetReference(&d).SetColor(col)
 	if d.Forum {
 		node.SetExpanded(false)
 		node.AddChild(tview.NewTreeNode("  …").SetSelectable(false).
-			SetColor(tcell.GetColor(colorInactive)))
+			SetColor(tcell.GetColor(theme.Inactive)))
 	}
 	return node
 }
@@ -870,7 +929,7 @@ func (u *ui) openChat(d telegram.Dialog) {
 			}
 			if err != nil {
 				u.messages.placeholder = "Ошибка загрузки истории"
-				u.status.SetText("[#f7768e]Ошибка: " + tview.Escape(err.Error()) + "[-]")
+				u.status.SetText("[" + theme.ErrorC + "]Ошибка: " + tview.Escape(err.Error()) + "[-]")
 				return
 			}
 			u.setHistory(h)
@@ -892,7 +951,7 @@ func (u *ui) sendMessage(d telegram.Dialog, text string) {
 	}
 	u.app.QueueUpdateDraw(func() {
 		if err != nil {
-			u.status.SetText("[#f7768e]Ошибка отправки: " + tview.Escape(err.Error()))
+			u.status.SetText("[" + theme.ErrorC + "]Ошибка отправки: " + tview.Escape(err.Error()))
 			return
 		}
 		u.input.SetText("", false)
@@ -910,7 +969,7 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 			if u.open != nil && u.open.TopicID == 0 && nm.PeerKey == u.open.Ref.Key() {
 				u.history = append(u.history, nm.Message)
 			} else if !nm.Message.Out {
-				u.status.SetText(" [#ffff55::b]● НОВОЕ[-:-:-] " + statusHints())
+				u.status.SetText(" [" + theme.Accent + "::b]● НОВОЕ[-:-:-] " + statusHints())
 			}
 		})
 	}
@@ -944,8 +1003,8 @@ func (u *ui) showMessageViewer(msg telegram.HistoryMessage) {
 	}
 	tv := tview.NewTextView().SetWrap(true).SetText(text)
 	tv.SetBorder(true).SetTitle(" " + tview.Escape(title) + " — Esc закрыть ")
-	tv.SetBorderColor(tcell.GetColor(colorBorderActive))
-	tv.SetTitleColor(tcell.GetColor(colorTitleActive))
+	tv.SetBorderColor(tcell.GetColor(theme.BorderActive))
+	tv.SetTitleColor(tcell.GetColor(theme.TitleActive))
 	tv.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		if ev.Key() == tcell.KeyEscape {
 			u.pages.RemovePage("viewer")
@@ -1013,7 +1072,7 @@ func (u *ui) copyToClipboard(text, okStatus string) {
 		err := clipboard.WriteAll(text)
 		u.app.QueueUpdateDraw(func() {
 			if err != nil {
-				u.status.SetText("[#f7768e]Буфер недоступен (нужен xclip/xsel/wl-clipboard)[-]")
+				u.status.SetText("[" + theme.ErrorC + "]Буфер недоступен (нужен xclip/xsel/wl-clipboard)[-]")
 			} else {
 				u.status.SetText(okStatus)
 			}
@@ -1025,7 +1084,7 @@ func (u *ui) copyMsg() {
 	if u.msgSel < 0 || u.msgSel >= len(u.history) {
 		return
 	}
-	u.copyToClipboard(u.history[u.msgSel].Plain(), "[#9ece6a]Скопировано[-]  "+msgHints())
+	u.copyToClipboard(u.history[u.msgSel].Plain(), "["+theme.Success+"]Скопировано[-]  "+msgHints())
 }
 
 func (u *ui) copySelected() {
@@ -1039,7 +1098,7 @@ func (u *ui) copySelected() {
 		parts = append(parts, u.history[i].Plain())
 	}
 	u.copyToClipboard(strings.Join(parts, "\n\n"),
-		fmt.Sprintf("[#9ece6a]Скопировано сообщений: %d[-]  %s", len(idx), msgHints()))
+		fmt.Sprintf("[%s]Скопировано сообщений: %d[-]  %s", theme.Success, len(idx), msgHints()))
 }
 
 func (u *ui) quoteMsg() {
@@ -1129,10 +1188,10 @@ func (u *ui) showElementHints() {
 	pos := fmt.Sprintf("[%d/%d] ", u.msgElem+1, len(els))
 	switch e := els[u.msgElem]; e.kind {
 	case "link":
-		u.status.SetText(fmt.Sprintf("[#7aa2f7]%s🔗 %s[-]  ", pos, tview.Escape(e.value)) +
+		u.status.SetText(fmt.Sprintf("[%s]%s🔗 %s[-]  ", theme.MsgLink, pos, tview.Escape(e.value)) +
 			borlandBar([][3]string{{"open", "o", "Браузер"}, {"copy", "c", "Копир.ссылку"}, {"menu", "F10", "Меню"}}))
 	case "media":
-		u.status.SetText(fmt.Sprintf("[#e0af68]%s📎 %s[-]  ", pos, tview.Escape(e.label)) +
+		u.status.SetText(fmt.Sprintf("[%s]%s📎 %s[-]  ", theme.MsgCode, pos, tview.Escape(e.label)) +
 			borlandBar([][3]string{{"open", "o", "Скачать/Открыть"}, {"menu", "F10", "Меню"}}))
 	default:
 		u.status.SetText(pos + msgHints())
@@ -1142,7 +1201,7 @@ func (u *ui) showElementHints() {
 // elemCopy копирует адрес ссылки (если выбрана ссылка) или текст сообщения.
 func (u *ui) elemCopy() {
 	if e, ok := u.currentElement(); ok && e.kind == "link" {
-		u.copyToClipboard(e.value, "[#9ece6a]Ссылка скопирована[-]  "+msgHints())
+		u.copyToClipboard(e.value, "["+theme.Success+"]Ссылка скопирована[-]  "+msgHints())
 		return
 	}
 	u.copyMsg()
@@ -1152,9 +1211,9 @@ func (u *ui) elemCopy() {
 func (u *ui) elemOpen() {
 	if e, ok := u.currentElement(); ok && e.kind == "link" {
 		if err := openExternal(e.value); err != nil {
-			u.status.SetText("[#f7768e]Не удалось открыть ссылку[-]")
+			u.status.SetText("[" + theme.ErrorC + "]Не удалось открыть ссылку[-]")
 		} else {
-			u.status.SetText("[#9ece6a]Открыто: " + tview.Escape(e.value) + "[-]  " + msgHints())
+			u.status.SetText("[" + theme.Success + "]Открыто: " + tview.Escape(e.value) + "[-]  " + msgHints())
 		}
 		return
 	}
@@ -1177,7 +1236,7 @@ func (u *ui) openAttachment() {
 	}
 	msg := u.history[u.msgSel]
 	if msg.Media == nil {
-		u.status.SetText("[#e0af68]У этого сообщения нет вложения[-]  " + msgHints())
+		u.status.SetText("[" + theme.Warn + "]У этого сообщения нет вложения[-]  " + msgHints())
 		return
 	}
 	if u.open == nil || u.sess == nil {
@@ -1194,14 +1253,14 @@ func (u *ui) openAttachment() {
 	if dl := u.downloads[id]; dl != nil { // уже качается → пауза
 		dl.cancel()
 		delete(u.downloads, id)
-		u.status.SetText("[#e0af68]⏸ Пауза: " + tview.Escape(name) + " (o — продолжить)[-]")
+		u.status.SetText("[" + theme.Warn + "]⏸ Пауза: " + tview.Escape(name) + " (o — продолжить)[-]")
 		return
 	}
 
 	ctx, cancel := context.WithCancel(u.ctx)
 	u.downloads[id] = &download{cancel: cancel, total: msg.Media.Size}
 	open := *u.open
-	u.status.SetText("[#7dcfff]⬇ Загрузка " + tview.Escape(name) + "…[-]")
+	u.status.SetText("[" + theme.Info + "]⬇ Загрузка " + tview.Escape(name) + "…[-]")
 	go func() {
 		err := u.sess.DownloadMediaTo(ctx, open.Peer, id, path, func(done, total int64) {
 			u.app.QueueUpdateDraw(func() {
@@ -1217,7 +1276,7 @@ func (u *ui) openAttachment() {
 			case errors.Is(err, context.Canceled):
 				// пауза — статус уже показан, ничего не делаем
 			case err != nil:
-				u.status.SetText("[#f7768e]Ошибка загрузки: " + tview.Escape(err.Error()) + "[-]")
+				u.status.SetText("[" + theme.ErrorC + "]Ошибка загрузки: " + tview.Escape(err.Error()) + "[-]")
 			default:
 				u.openCached(path)
 			}
@@ -1228,19 +1287,19 @@ func (u *ui) openAttachment() {
 // openCached открывает уже скачанный файл внешней программой.
 func (u *ui) openCached(path string) {
 	if err := openExternal(path); err != nil {
-		u.status.SetText("[#e0af68]Сохранено: " + tview.Escape(path) + " (открыть не удалось)[-]")
+		u.status.SetText("[" + theme.Warn + "]Сохранено: " + tview.Escape(path) + " (открыть не удалось)[-]")
 		return
 	}
-	u.status.SetText("[#9ece6a]Открыто: " + tview.Escape(path) + "[-]  " + msgHints())
+	u.status.SetText("[" + theme.Success + "]Открыто: " + tview.Escape(path) + "[-]  " + msgHints())
 }
 
 // showDownloadProgress показывает прогресс загрузки в строке состояния.
 func (u *ui) showDownloadProgress(name string, done, total int64) {
 	if total > 0 {
-		u.status.SetText(fmt.Sprintf("[#7dcfff]⬇ %s %d%% (%s / %s)[-]  o — пауза",
-			tview.Escape(name), done*100/total, humanBytes(done), humanBytes(total)))
+		u.status.SetText(fmt.Sprintf("[%s]⬇ %s %d%% (%s / %s)[-]  o — пауза",
+			theme.Info, tview.Escape(name), done*100/total, humanBytes(done), humanBytes(total)))
 	} else {
-		u.status.SetText(fmt.Sprintf("[#7dcfff]⬇ %s %s[-]  o — пауза", tview.Escape(name), humanBytes(done)))
+		u.status.SetText(fmt.Sprintf("[%s]⬇ %s %s[-]  o — пауза", theme.Info, tview.Escape(name), humanBytes(done)))
 	}
 }
 
@@ -1311,11 +1370,11 @@ func (u *ui) deleteMsg() {
 			err := u.sess.DeleteMessages(u.ctx, open.Peer, ids)
 			u.app.QueueUpdateDraw(func() {
 				if err != nil {
-					u.status.SetText("[#f7768e]Ошибка удаления: " + tview.Escape(err.Error()) + "[-]")
+					u.status.SetText("[" + theme.ErrorC + "]Ошибка удаления: " + tview.Escape(err.Error()) + "[-]")
 					return
 				}
 				u.selected = map[int]bool{}
-				u.status.SetText("[#9ece6a]Удалено[-]  " + msgHints())
+				u.status.SetText("[" + theme.Success + "]Удалено[-]  " + msgHints())
 			})
 			go u.reloadHistory(open)
 		}()
@@ -1358,7 +1417,7 @@ func (u *ui) showHelp() {
 		"F3 — полный текст сообщения   Enter — перейти к вводу\n" +
 		"\n" +
 		"Ввод: Enter — отправить, Alt+Enter — перенос, Esc — к сообщениям\n" +
-		"F1 — справка   F10 — меню   Alt+X / Ctrl+C — выход"
+		"F1 — справка   F8 — тема   F10 — меню   Alt+X / Ctrl+C — выход"
 	u.showDialog("Горячие клавиши", help, []string{"OK"}, nil)
 }
 
@@ -1381,7 +1440,7 @@ func drawScrollbar(screen tcell.Screen, col, y, h, offset, total, viewport int) 
 	}
 	style := tcell.StyleDefault.
 		Background(tview.Styles.PrimitiveBackgroundColor).
-		Foreground(tcell.GetColor(colorScroll))
+		Foreground(tcell.GetColor(theme.Scroll))
 	screen.SetContent(col, y, '▲', nil, style)
 	screen.SetContent(col, y+h-1, '▼', nil, style)
 	track := h - 2
@@ -1430,8 +1489,8 @@ func drawScrollbar(screen tcell.Screen, col, y, h, offset, total, viewport int) 
 func borlandBar(items [][3]string) string {
 	var b strings.Builder
 	for _, it := range items {
-		// Клавиша — красная жирная (как акселераторы в меню-баре), описание — тёмное.
-		fmt.Fprintf(&b, ` ["%s"][#b00000::b]%s[#101010::-] %s [""]`, it[0], it[1], it[2])
+		// Клавиша — акцентная жирная (как акселераторы в меню-баре), описание — текст бара.
+		fmt.Fprintf(&b, ` ["%s"][%s::b]%s[%s::-] %s [""]`, it[0], theme.BarAccel, it[1], theme.BarFg, it[2])
 	}
 	return b.String()
 }

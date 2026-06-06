@@ -36,8 +36,8 @@ func newDialog(title string, lines, buttons []string, onDone func(int)) *dialog 
 		onDone:  onDone,
 	}
 	d.SetBorder(true).SetTitle(" " + title + " ")
-	d.SetBorderColor(tcell.GetColor(colorBorderActive))
-	d.SetTitleColor(tcell.GetColor(colorTitleActive))
+	d.SetBorderColor(tcell.GetColor(theme.BorderActive))
+	d.SetTitleColor(tcell.GetColor(theme.TitleActive))
 	// По умолчанию фокус на первой кнопке: для confirm это «Отмена» —
 	// безопасно при необратимых действиях (Enter не удаляет случайно).
 	return d
@@ -105,11 +105,11 @@ func (d *dialog) drawButtons(screen tcell.Screen, x, y, width int) {
 		}
 		style := tcell.StyleDefault.
 			Background(tview.Styles.PrimitiveBackgroundColor).
-			Foreground(tcell.GetColor(colorMenuText))
+			Foreground(tcell.GetColor(theme.MenuText))
 		if i == d.active {
 			style = tcell.StyleDefault.
-				Background(tcell.GetColor(colorMenuSelBg)).
-				Foreground(tcell.GetColor(colorMenuSelFg))
+				Background(tcell.GetColor(theme.MenuSelBg)).
+				Foreground(tcell.GetColor(theme.MenuSelFg))
 		}
 		start := col
 		for _, ch := range "[ " + b + " ]" {
