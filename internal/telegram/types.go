@@ -164,6 +164,8 @@ func mediaKindName(kind string) string {
 		return "фото"
 	case "video":
 		return "видео"
+	case "round":
+		return "кружок"
 	case "gif":
 		return "GIF"
 	case "audio":

@@ -124,7 +124,7 @@ func mediaFrom(m *tg.Message) *Media {
 
 // docKind определяет вид документа по его атрибутам.
 func docKind(doc *tg.Document) string {
-	var animated, video, sticker bool
+	var animated, video, sticker, round bool
 	var audioVoice, audio bool
 	for _, a := range doc.Attributes {
 		switch at := a.(type) {
@@ -132,6 +132,9 @@ func docKind(doc *tg.Document) string {
 			animated = true
 		case *tg.DocumentAttributeVideo:
 			video = true
+			if at.RoundMessage { // круглое видео-сообщение («кружок»)
+				round = true
+			}
 		case *tg.DocumentAttributeSticker:
 			sticker = true
 		case *tg.DocumentAttributeAudio:
@@ -147,6 +150,8 @@ func docKind(doc *tg.Document) string {
 		return "sticker"
 	case animated:
 		return "gif"
+	case round:
+		return "round"
 	case video:
 		return "video"
 	case audioVoice:

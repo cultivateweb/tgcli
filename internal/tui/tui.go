@@ -1435,7 +1435,7 @@ func (u *ui) attachmentPath(msgID int64, m *telegram.Media) string {
 			name = "photo.jpg"
 		case "voice":
 			name = "voice.ogg"
-		case "video", "gif":
+		case "video", "gif", "round":
 			name = m.Kind + ".mp4"
 		default:
 			name = m.Kind
