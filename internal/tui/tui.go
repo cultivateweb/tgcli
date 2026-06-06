@@ -397,6 +397,10 @@ func (u *ui) build() {
 		},
 		func() { u.details.SetTitle(u.detailsTitle) })
 	u.details.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
+		if ev.Key() == tcell.KeyEscape { // Esc → закрыть «Информацию», вернуться к переписке
+			u.toggleInfo()
+			return nil
+		}
 		if ev.Rune() == 'c' {
 			i := u.details.GetCurrentItem()
 			if i >= 0 && i < len(u.detailValues) {
@@ -1562,6 +1566,6 @@ func inputHints() string {
 // detailsHints — подсказки панели «Информация».
 func detailsHints() string {
 	return borlandBar([][3]string{
-		{"copy", "c", "Копир"}, {"info", "Alt+I", "Закрыть"}, {"menu", "F10", "Меню"},
+		{"copy", "c", "Копир"}, {"nav", "↑↓", "Поле"}, {"back", "Esc", "Закрыть"}, {"menu", "F10", "Меню"},
 	})
 }

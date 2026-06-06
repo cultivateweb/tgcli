@@ -6,6 +6,8 @@ package tui
 // длинных сообщений (полный текст — по F3) и собственная прокрутка к выбранному.
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
@@ -76,30 +78,62 @@ func (m *msgList) Draw(screen tcell.Screen) {
 	drawScrollbar(screen, bx+bw-1, by+1, bh-2, m.offset, len(rows), h)
 }
 
-// layout раскладывает все сообщения в строки шириной w, усекая слишком длинные.
-// Возвращает строки и диапазон строк выбранного сообщения.
+// layout раскладывает сообщения в строки шириной w. Каждое сообщение —
+// двустрочный блок: шапка (автор слева, время справа) и тело с отступом ниже;
+// слишком длинное тело усекается (полный текст — по F3). Возвращает строки и
+// диапазон строк выбранного сообщения.
 func (m *msgList) layout(w, h int) (rows []mrow, selStart, selEnd int) {
 	u := m.ui
-	maxLines := h / 3 // слишком длинные (> трети высоты) сокращаем
+	maxLines := h / 3 // слишком длинное тело (> трети высоты) сокращаем
 	if maxLines < 4 {
 		maxLines = 4
 	}
+	const indent = "   "
+	indW := runewidth.StringWidth(indent)
 	for i := range u.history {
 		bg := m.bgFor(i)
-		grows := wrapGlyphs(u.messageGlyphs(i), w)
-		if len(grows) > maxLines {
-			grows = grows[:maxLines-1]
-			grows = append(grows, glyphsOf("  … (F3 — открыть целиком)", tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim))))
-		}
 		start := len(rows)
-		for _, gr := range grows {
-			rows = append(rows, mrow{bg: bg, glyphs: gr})
+		rows = append(rows, mrow{bg: bg, glyphs: m.headerGlyphs(i, w)})
+		body := wrapGlyphs(u.bodyGlyphs(i), w-indW)
+		if len(body) > maxLines {
+			body = body[:maxLines-1]
+			body = append(body, glyphsOf("… (F3 — открыть целиком)", tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim))))
+		}
+		for _, gr := range body {
+			rows = append(rows, mrow{bg: bg, glyphs: append(glyphsOf(indent, tcell.StyleDefault), gr...)})
 		}
 		if i == u.msgSel {
 			selStart, selEnd = start, len(rows)-1
 		}
 	}
 	return rows, selStart, selEnd
+}
+
+// headerGlyphs строит строку-шапку сообщения: имя автора слева (исходящее — «Вы»),
+// время прижато к правому краю панели шириной w.
+func (m *msgList) headerGlyphs(i, w int) []mglyph {
+	msg := m.ui.history[i]
+	author := msg.Author
+	authSt := tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgAuthor)).Bold(true)
+	if msg.Out {
+		author = "Вы"
+		authSt = tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgOut)).Bold(true)
+	}
+	tm := msg.Date.Format("15:04")
+	timeW := runewidth.StringWidth(tm)
+	maxAuthor := w - timeW - 1 // место под автора, пробел и время
+	if maxAuthor < 1 {
+		maxAuthor = 1
+	}
+	author = runewidth.Truncate(strings.TrimSpace(author), maxAuthor, "…")
+	gap := w - runewidth.StringWidth(author) - timeW
+	if gap < 1 {
+		gap = 1
+	}
+	g := glyphsOf(author, authSt)
+	g = append(g, glyphsOf(strings.Repeat(" ", gap), tcell.StyleDefault)...)
+	g = append(g, glyphsOf(tm, tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim)))...)
+	return g
 }
 
 // bgFor — фон сообщения: выбранное — полоса-курсор, остальные — зебра по чётности.
@@ -196,25 +230,19 @@ func wrapGlyphs(g []mglyph, w int) [][]mglyph {
 	return rows
 }
 
-// messageGlyphs превращает сообщение в плоский поток символов со стилями
-// (время, автор, форматированное тело, строка вложения).
-func (u *ui) messageGlyphs(i int) []mglyph {
+// bodyGlyphs превращает тело сообщения в поток символов со стилями
+// (форматированный текст и строка вложения) — без времени и автора, они в шапке.
+func (u *ui) bodyGlyphs(i int) []mglyph {
 	msg := u.history[i]
 	var g []mglyph
 	push := func(s string, st tcell.Style) { g = append(g, glyphsOf(s, st)...) }
 
-	push(msg.Date.Format("15:04")+" ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.TextDim)))
-	if msg.Out {
-		push("→ ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgOut)))
-	} else {
-		push(msg.Author+": ", tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgAuthor)).Bold(true))
-	}
-	yellow := tcell.StyleDefault.Foreground(tview.Styles.PrimaryTextColor)
+	base := tcell.StyleDefault.Foreground(tcell.GetColor(theme.Text))
 	if len(msg.Spans) == 0 {
-		push(msg.Text, yellow)
+		push(msg.Text, base)
 	} else {
 		for _, s := range msg.Spans {
-			st := yellow
+			st := base
 			if s.B {
 				st = st.Bold(true)
 			}
@@ -234,7 +262,10 @@ func (u *ui) messageGlyphs(i int) []mglyph {
 		}
 	}
 	if msg.Media != nil {
-		push("\n📎 "+msg.Media.Label(), tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgCode)))
+		if len(g) > 0 {
+			push("\n", base)
+		}
+		push("📎 "+msg.Media.Label(), tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgCode)))
 	}
 	return g
 }
