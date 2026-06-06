@@ -9,6 +9,8 @@ package tui
 // новую палитру при ближайшей перерисовке.
 
 import (
+	"strings"
+
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -261,6 +263,31 @@ func themeByName(name string) Theme {
 		}
 	}
 	return tokyoNight
+}
+
+// ResolveThemeName приводит CLI-имя темы к каноническому Theme.Name. Принимает
+// точное имя или краткий алиас (tokyo, mocha, gruvbox, nord) без учёта регистра,
+// пробелов и дефисов. ok=false для неизвестного имени — чтобы CLI мог сообщить
+// об ошибке вместо тихого отката на тему по умолчанию.
+func ResolveThemeName(name string) (canonical string, ok bool) {
+	norm := func(s string) string {
+		return strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(s))
+	}
+	want := norm(name)
+	for _, t := range themes {
+		if norm(t.Name) == want {
+			return t.Name, true
+		}
+	}
+	switch want { // короткие алиасы
+	case "tokyo":
+		return tokyoNight.Name, true
+	case "mocha", "catppuccin":
+		return mocha.Name, true
+	case "gruvbox":
+		return gruvbox.Name, true
+	}
+	return "", false
 }
 
 // kindColor возвращает цвет чата по его типу (категории аккордеона). Неизвестный
