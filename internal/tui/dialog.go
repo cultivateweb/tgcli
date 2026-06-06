@@ -67,8 +67,8 @@ func (d *dialog) size() (int, int) {
 	if t := len([]rune(d.GetTitle())); t > content {
 		content = t
 	}
-	w := content + 4               // 1 паддинг + 1 рамка с каждой стороны
-	h := len(d.lines) + 2 + 2       // строки + пустая + кнопки, плюс рамка сверху/снизу
+	w := content + 4          // 1 паддинг + 1 рамка с каждой стороны
+	h := len(d.lines) + 2 + 2 // строки + пустая + кнопки, плюс рамка сверху/снизу
 	return w, h
 }
 
@@ -191,4 +191,41 @@ func (u *ui) showDialog(title, text string, buttons []string, choose func(idx in
 	// ним остаётся виден — так же, как выпадающие меню.
 	u.pages.AddPage("dialog", shadowed{d}, false, true)
 	u.app.SetFocus(d)
+}
+
+// showPrompt показывает модальное окно с однострочным полем ввода. onDone
+// получает введённый текст и ok=true при Enter с непустым текстом; ok=false при
+// Esc/отмене. Используется для ввода имени закладки (Ctrl+D).
+func (u *ui) showPrompt(title, initial string, onDone func(text string, ok bool)) {
+	in := tview.NewInputField().SetText(initial)
+	in.SetBorder(true).SetTitle(" " + title + " ")
+	in.SetBorderColor(tcell.GetColor(theme.BorderActive))
+	in.SetTitleColor(tcell.GetColor(theme.TitleActive))
+	in.SetFieldBackgroundColor(tcell.GetColor(theme.BgPanel))
+	in.SetFieldTextColor(tcell.GetColor(theme.Text))
+	in.SetDoneFunc(func(key tcell.Key) {
+		text := strings.TrimSpace(in.GetText())
+		u.pages.RemovePage("prompt")
+		if u.lastPanel != nil {
+			u.app.SetFocus(u.lastPanel)
+		} else {
+			u.app.SetFocus(u.tree)
+		}
+		onDone(text, key == tcell.KeyEnter && text != "")
+	})
+	u.pages.AddPage("prompt", centered(in, 54, 3), true, true)
+	u.app.SetFocus(in)
+}
+
+// centered размещает примитив p размером w×h по центру экрана, оставляя вокруг
+// прозрачные отступы (через nil-ячейки Flex интерфейс под ним остаётся виден).
+func centered(p tview.Primitive, w, h int) tview.Primitive {
+	col := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(nil, 0, 1, false).
+		AddItem(p, h, 0, true).
+		AddItem(nil, 0, 1, false)
+	return tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(col, w, 0, true).
+		AddItem(nil, 0, 1, false)
 }

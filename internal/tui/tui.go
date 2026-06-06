@@ -27,15 +27,15 @@ import (
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
-// Категории аккордеона в порядке отображения.
+// Категории аккордеона в порядке отображения. Saved Messages выводится
+// отдельным узлом (см. buildTree), поэтому "self" здесь нет.
 var kindOrder = []struct{ key, label string }{
-	{"self", "★ Избранное"},
-	{"user", "Люди"},
-	{"bot", "Боты"},
-	{"group", "Группы"},
-	{"mygroup", "Мои группы"},
-	{"channel", "Каналы"},
-	{"mychannel", "Мои каналы"},
+	{"user", "👤 Люди"},
+	{"bot", "🤖 Боты"},
+	{"group", "👥 Группы"},
+	{"mygroup", "👥 Мои группы"},
+	{"channel", "📣 Каналы"},
+	{"mychannel", "📣 Мои каналы"},
 }
 
 func groupKey(d telegram.Dialog) string {
@@ -100,6 +100,7 @@ type ui struct {
 	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
 	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
 	treeWidth   int                 // текущая внутренняя ширина панели «Чаты» (для выравнивания)
+	favNode     *tview.TreeNode     // узел категории «★ Избранное» (для удаления закладок по d)
 }
 
 // Run строит и запускает интерфейс. c, cfg и updates могут быть nil.
@@ -248,6 +249,9 @@ func (u *ui) build() {
 				u.app.SetFocus(u.messages)
 			}
 			return nil
+		case tcell.KeyDelete: // Delete — убрать закладку из избранного
+			u.removeBookmarkNode(cur)
+			return nil
 		case tcell.KeyRight:
 			if cur != nil {
 				if ref := cur.GetReference(); ref != nil {
@@ -272,6 +276,10 @@ func (u *ui) build() {
 				p.SetExpanded(false) // из чата — свернуть его закладку и встать на неё
 				u.tree.SetCurrentNode(p)
 			}
+			return nil
+		}
+		if ev.Rune() == 'd' { // d — убрать закладку из избранного (с подтверждением)
+			u.removeBookmarkNode(cur)
 			return nil
 		}
 		return ev
@@ -440,9 +448,9 @@ func (u *ui) build() {
 
 	// Глобальные хоткеи.
 	u.app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
-		// При открытом модальном окне (диалог/просмотр сообщения) все клавиши
-		// идут в него — глобальные хоткеи не вмешиваются.
-		if u.pages != nil && (u.pages.HasPage("dialog") || u.pages.HasPage("viewer")) {
+		// При открытом модальном окне (диалог/просмотр/ввод) все клавиши идут
+		// в него — глобальные хоткеи не вмешиваются.
+		if u.pages != nil && (u.pages.HasPage("dialog") || u.pages.HasPage("viewer") || u.pages.HasPage("prompt")) {
 			return ev
 		}
 		// Alt+буква: открыть пункт меню по «горячей» букве; Alt+X — выход.
@@ -487,6 +495,9 @@ func (u *ui) build() {
 			return nil
 		case tcell.KeyCtrlB:
 			u.toggleTree()
+			return nil
+		case tcell.KeyCtrlD: // Ctrl+D — добавить выбранный чат в избранное
+			u.bookmarkCurrent()
 			return nil
 		}
 		return ev
@@ -679,23 +690,26 @@ func (u *ui) recolorTree() {
 		return
 	}
 	root.SetColor(tcell.GetColor(theme.TextBright))
-	catKey := map[string]string{"● Непрочитанные": "unread"}
+	catColor := map[string]string{
+		"★ Избранное":     theme.Warn,
+		"● Непрочитанные": kindColor("unread"),
+	}
 	for _, g := range kindOrder {
-		catKey[strings.TrimSpace(g.label)] = g.key
+		catColor[strings.TrimSpace(g.label)] = kindColor(g.key)
 	}
 	root.Walk(func(n, parent *tview.TreeNode) bool {
 		if n == root {
 			return true
 		}
-		if d, ok := n.GetReference().(*telegram.Dialog); ok { // чат или тема форума
+		if d, ok := n.GetReference().(*telegram.Dialog); ok { // чат, тема форума, Saved Messages
 			n.SetColor(tcell.GetColor(kindColor(d.Kind)))
 			return true
 		}
 		if parent == root { // категория-закладка
 			text := strings.TrimSpace(n.GetText())
-			for label, key := range catKey {
+			for label, color := range catColor {
 				if strings.HasPrefix(text, label) {
-					n.SetColor(tcell.GetColor(kindColor(key)))
+					n.SetColor(tcell.GetColor(color))
 					return true
 				}
 			}
@@ -724,7 +738,9 @@ func (u *ui) loadDialogs() {
 	}
 	d, err := u.sess.Dialogs(u.ctx, 200, false)
 	if err != nil {
-		u.app.QueueUpdateDraw(func() { u.status.SetText("[" + theme.ErrorC + "]Ошибка диалогов: " + tview.Escape(err.Error())) })
+		u.app.QueueUpdateDraw(func() {
+			u.status.SetText("[" + theme.ErrorC + "]Ошибка диалогов: " + tview.Escape(err.Error()))
+		})
 		return
 	}
 	if u.cache != nil {
@@ -783,6 +799,58 @@ func treeLine(title, count string, width int) string {
 		gap = 1
 	}
 	return title + strings.Repeat(" ", gap) + count
+}
+
+// Ширины колонок строки чата (в клетках терминала).
+const (
+	nickColW  = 18 // колонка «@ник»
+	countColW = 6  // колонка счётчика непрочитанных, прижата вправо
+)
+
+// treeRow форматирует строку чата тремя колонками: имя (слева, тянется), @ник
+// (фиксированная колонка), счётчик непрочитанных (справа). На узкой панели
+// деградирует до «имя … счётчик», чтобы не ломать выравнивание.
+func treeRow(name, nick, count string, width int) string {
+	if width < nickColW+countColW+8 {
+		full := strings.TrimSpace(name)
+		if nick != "" {
+			full += "  " + nick
+		}
+		return treeLine(full, count, width)
+	}
+	nameW := width - nickColW - countColW
+	name = padRightCells(runewidth.Truncate(strings.TrimSpace(name), nameW, "…"), nameW)
+	nick = padRightCells(runewidth.Truncate(nick, nickColW, "…"), nickColW)
+	count = padLeftCells(runewidth.Truncate(count, countColW, ""), countColW)
+	return name + nick + count
+}
+
+// splitTitle разбивает «@ник - Имя Фамилия» (формат DisplayName) на имя и @ник.
+// Без «@» весь заголовок считается именем (группы/каналы без username).
+func splitTitle(title string) (name, nick string) {
+	title = strings.TrimSpace(title)
+	if strings.HasPrefix(title, "@") {
+		if i := strings.Index(title, " - "); i >= 0 {
+			return strings.TrimSpace(title[i+3:]), strings.TrimSpace(title[:i])
+		}
+		return "", title // только @ник
+	}
+	return title, ""
+}
+
+// padRightCells/padLeftCells дополняют строку пробелами до ширины w в клетках.
+func padRightCells(s string, w int) string {
+	if g := w - runewidth.StringWidth(s); g > 0 {
+		return s + strings.Repeat(" ", g)
+	}
+	return s
+}
+
+func padLeftCells(s string, w int) string {
+	if g := w - runewidth.StringWidth(s); g > 0 {
+		return strings.Repeat(" ", g) + s
+	}
+	return s
 }
 
 // treeParent находит родителя узла (TreeNode не хранит ссылку на родителя).
@@ -846,6 +914,7 @@ func (u *ui) buildTree() {
 	// Узлы пересоздаются — сбрасываем отметки загруженных форумов, иначе заглушка
 	// «…» залипнет (loadForum посчитает темы уже загруженными).
 	u.forumLoaded = map[string]bool{}
+	u.favNode = nil
 	groups := map[string][]telegram.Dialog{}
 	for _, d := range u.dialogs {
 		groups[groupKey(d)] = append(groups[groupKey(d)], d)
@@ -853,7 +922,18 @@ func (u *ui) buildTree() {
 	root := tview.NewTreeNode("Закладки").SetSelectable(false).
 		SetColor(tcell.GetColor(theme.TextBright))
 
-	// «Непрочитанные» — сводная закладка сверху: чаты с непрочитанными, не в муте.
+	// ★ Избранное — локальные закладки (свои имена, хранятся в конфиге).
+	if u.cfg != nil && len(u.cfg.Bookmarks) > 0 {
+		cat := tview.NewTreeNode(treeLine("★ Избранное", fmt.Sprintf("(%d)", len(u.cfg.Bookmarks)), u.treeAvail(1))).
+			SetColor(tcell.GetColor(theme.Warn)).SetSelectable(true).SetExpanded(true)
+		for _, b := range u.cfg.Bookmarks {
+			cat.AddChild(u.chatNode(u.bookmarkDialog(b)))
+		}
+		root.AddChild(cat)
+		u.favNode = cat
+	}
+
+	// ● Непрочитанные — сводная закладка: чаты с непрочитанными, не в муте.
 	var unread []telegram.Dialog
 	for _, d := range u.dialogs {
 		if d.Unread > 0 && !d.Muted {
@@ -869,13 +949,27 @@ func (u *ui) buildTree() {
 		root.AddChild(cat)
 	}
 
+	// 💾 Saved Messages — отдельной строкой верхнего уровня (а не категорией).
+	for i := range u.dialogs {
+		if u.dialogs[i].Kind == "self" {
+			sd := u.dialogs[i]
+			count := ""
+			if sd.Unread > 0 {
+				count = fmt.Sprintf("(%d)", sd.Unread)
+			}
+			root.AddChild(tview.NewTreeNode(treeRow("💾 Saved Messages", "", count, u.treeAvail(1))).
+				SetReference(&sd).SetColor(tcell.GetColor(kindColor("self"))))
+			break
+		}
+	}
+
 	for _, g := range kindOrder {
 		list := groups[g.key]
 		if len(list) == 0 {
 			continue
 		}
 		cat := tview.NewTreeNode(treeLine(g.label, fmt.Sprintf("(%d)", len(list)), u.treeAvail(1))).
-			SetColor(tcell.GetColor(kindColor(g.key))).SetSelectable(true).SetExpanded(g.key == "self")
+			SetColor(tcell.GetColor(kindColor(g.key))).SetSelectable(true)
 		for i := range list {
 			cat.AddChild(u.chatNode(list[i]))
 		}
@@ -891,8 +985,9 @@ func (u *ui) chatNode(d telegram.Dialog) *tview.TreeNode {
 	if d.Unread > 0 {
 		count = fmt.Sprintf("(%d)", d.Unread)
 	}
+	name, nick := splitTitle(d.Title)
 	col := tcell.GetColor(kindColor(d.Kind))
-	node := tview.NewTreeNode(treeLine(d.Title, count, u.treeAvail(2))).
+	node := tview.NewTreeNode(treeRow(name, nick, count, u.treeAvail(2))).
 		SetReference(&d).SetColor(col)
 	if d.Forum {
 		node.SetExpanded(false)
@@ -1250,7 +1345,7 @@ func (u *ui) elemOpen() {
 
 // download — активная загрузка вложения: отмена (для паузы) и прогресс.
 type download struct {
-	cancel     context.CancelFunc
+	cancel      context.CancelFunc
 	done, total int64
 }
 
@@ -1544,14 +1639,17 @@ func msgHints() string {
 func (u *ui) treeHints() string {
 	items := [][3]string{
 		{"sel", "Enter", "Открыть"}, {"nav", "↑↓", "Выбор"}, {"exp", "←→", "Свернуть"},
+		{"fav", "^D", "В избранное"},
+	}
+	if u.favNode != nil {
+		items = append(items, [3]string{"unfav", "d", "Убрать"})
 	}
 	if u.open != nil {
 		items = append(items, [3]string{"back", "Esc", "К переписке"})
 	}
 	items = append(items,
 		[3]string{"theme", "F8", "Тема"},
-		[3]string{"menu", "F10", "Меню"},
-		[3]string{"quit", "Alt+X", "Выход"})
+		[3]string{"menu", "F10", "Меню"})
 	return borlandBar(items)
 }
 
