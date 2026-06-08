@@ -326,6 +326,7 @@ func (u *ui) build() {
 				u.showTree = true
 				u.rebuildMid()
 			}
+			u.selectOpenChatInTree() // подсветить открытый чат в списке
 			u.app.SetFocus(u.tree)
 			return nil
 		case tcell.KeyTab: // Tab/Shift+Tab → следующий/предыдущий элемент сообщения
@@ -601,10 +602,43 @@ func (u *ui) toggleTree() {
 	u.showTree = !u.showTree
 	u.rebuildMid()
 	if u.showTree {
+		u.selectOpenChatInTree()
 		u.app.SetFocus(u.tree)
 	} else {
 		u.app.SetFocus(u.messages)
 	}
+}
+
+// selectOpenChatInTree выделяет в дереве узел открытого чата и раскрывает все его
+// категории-предки, чтобы при возврате к списку открытый чат был виден и
+// подсвечен (после пересборки дерева он мог переехать в свёрнутую группу).
+func (u *ui) selectOpenChatInTree() {
+	if u.open == nil {
+		return
+	}
+	root := u.tree.GetRoot()
+	if root == nil {
+		return
+	}
+	want := "chat:" + u.open.Ref.Key() + ":" + strconv.Itoa(u.open.TopicID)
+	var found *tview.TreeNode
+	root.Walk(func(n, _ *tview.TreeNode) bool {
+		if found != nil {
+			return false // уже нашли — глубже не идём
+		}
+		if n != root && u.nodeIdentity(n) == want {
+			found = n
+			return false
+		}
+		return true
+	})
+	if found == nil {
+		return
+	}
+	for p := u.treeParent(found); p != nil && p != root; p = u.treeParent(p) {
+		p.SetExpanded(true) // раскрыть всех предков, чтобы узел стал виден
+	}
+	u.tree.SetCurrentNode(found)
 }
 
 func (u *ui) toggleDetails() {
