@@ -10,6 +10,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/rivo/tview v0.42.0
+	github.com/rivo/uniseg v0.4.7
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/term v0.43.0
 )
@@ -43,7 +44,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/ogen-go/ogen v1.19.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect

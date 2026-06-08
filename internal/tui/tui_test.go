@@ -28,6 +28,25 @@ func TestGroupKey(t *testing.T) {
 	}
 }
 
+// TestTreeWidthEmoji проверяет, что разметка узла дерева занимает ровно width
+// клеток даже при эмодзи-флагах и новых эмодзи (иначе колонки «съезжают»).
+func TestTreeWidthEmoji(t *testing.T) {
+	const width = 50
+	titles := []string{
+		"Lviv Python Community 🪖🇺🇦",
+		"🇺🇦🇺🇦🇺🇦 флаги",
+		"обычный канал",
+	}
+	for _, ti := range titles {
+		if w := cellsWidth(treeRow(ti, "", "(3)", width)); w != width {
+			t.Errorf("treeRow(%q) ширина = %d, ожидалось %d", ti, w, width)
+		}
+		if w := cellsWidth(treeLine(ti, "(3)", width)); w != width {
+			t.Errorf("treeLine(%q) ширина = %d, ожидалось %d", ti, w, width)
+		}
+	}
+}
+
 func TestStableLabel(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"🔔 Активные   (3)", "🔔 Активные"},

@@ -20,8 +20,8 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/gdamore/tcell/v2"
-	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
+	"github.com/rivo/uniseg"
 
 	"github.com/cultivateweb/tgcli/internal/cache"
 	"github.com/cultivateweb/tgcli/internal/config"
@@ -827,6 +827,38 @@ func (u *ui) treeAvail(level int) int {
 	return w
 }
 
+// cellsWidth — ширина строки в клетках терминала с учётом grapheme-кластеров
+// (через uniseg, как рисует tview). В отличие от go-runewidth корректно считает
+// флаги-эмодзи (🇺🇦 = два regional indicator, но одна клетка ×2) и новые эмодзи —
+// иначе разметка колонок дерева расходится с отрисовкой и текст «съезжает».
+func cellsWidth(s string) int { return uniseg.StringWidth(s) }
+
+// truncCells усекает строку до ширины width клеток (включая хвост tail), не
+// разрывая grapheme-кластеры. Аналог runewidth.Truncate, но согласован с uniseg.
+func truncCells(s string, width int, tail string) string {
+	if cellsWidth(s) <= width {
+		return s
+	}
+	limit := width - cellsWidth(tail)
+	if limit < 0 {
+		limit = 0
+	}
+	var b strings.Builder
+	w := 0
+	gr := uniseg.NewGraphemes(s)
+	for gr.Next() {
+		c := gr.Str()
+		cw := cellsWidth(c)
+		if w+cw > limit {
+			break
+		}
+		b.WriteString(c)
+		w += cw
+	}
+	b.WriteString(tail)
+	return b.String()
+}
+
 // treeLine форматирует строку узла: заголовок слева, счётчик прижат к правому
 // краю, между ними — заполнение пробелами до доступной ширины width. Ширина
 // считается в КЛЕТКАХ терминала (эмодзи/CJK = 2), длинный заголовок усекается
@@ -834,15 +866,15 @@ func (u *ui) treeAvail(level int) int {
 func treeLine(title, count string, width int) string {
 	title = strings.TrimSpace(title)
 	if count == "" {
-		return runewidth.Truncate(title, width, "…")
+		return truncCells(title, width, "…")
 	}
-	cw := runewidth.StringWidth(count)
+	cw := cellsWidth(count)
 	maxTitle := width - cw - 1
 	if maxTitle < 1 {
 		maxTitle = 1
 	}
-	title = runewidth.Truncate(title, maxTitle, "…")
-	gap := width - runewidth.StringWidth(title) - cw
+	title = truncCells(title, maxTitle, "…")
+	gap := width - cellsWidth(title) - cw
 	if gap < 1 {
 		gap = 1
 	}
@@ -867,9 +899,9 @@ func treeRow(name, nick, count string, width int) string {
 		return treeLine(full, count, width)
 	}
 	nameW := width - nickColW - countColW
-	name = padRightCells(runewidth.Truncate(strings.TrimSpace(name), nameW, "…"), nameW)
-	nick = padRightCells(runewidth.Truncate(nick, nickColW, "…"), nickColW)
-	count = padLeftCells(runewidth.Truncate(count, countColW, ""), countColW)
+	name = padRightCells(truncCells(strings.TrimSpace(name), nameW, "…"), nameW)
+	nick = padRightCells(truncCells(nick, nickColW, "…"), nickColW)
+	count = padLeftCells(truncCells(count, countColW, ""), countColW)
 	return name + nick + count
 }
 
@@ -888,14 +920,14 @@ func splitTitle(title string) (name, nick string) {
 
 // padRightCells/padLeftCells дополняют строку пробелами до ширины w в клетках.
 func padRightCells(s string, w int) string {
-	if g := w - runewidth.StringWidth(s); g > 0 {
+	if g := w - cellsWidth(s); g > 0 {
 		return s + strings.Repeat(" ", g)
 	}
 	return s
 }
 
 func padLeftCells(s string, w int) string {
-	if g := w - runewidth.StringWidth(s); g > 0 {
+	if g := w - cellsWidth(s); g > 0 {
 		return strings.Repeat(" ", g) + s
 	}
 	return s
