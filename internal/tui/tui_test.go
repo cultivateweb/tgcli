@@ -27,3 +27,18 @@ func TestGroupKey(t *testing.T) {
 		}
 	}
 }
+
+func TestStableLabel(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"🔔 Активные   (3)", "🔔 Активные"},
+		{"★ Избранное (12)", "★ Избранное"},
+		{"👤 Люди      (40)", "👤 Люди"},
+		{"💾 Saved Messages", "💾 Saved Messages"},
+		{"  без счётчика  ", "без счётчика"},
+	}
+	for _, c := range cases {
+		if got := stableLabel(c.in); got != c.want {
+			t.Errorf("stableLabel(%q) = %q, ожидалось %q", c.in, got, c.want)
+		}
+	}
+}

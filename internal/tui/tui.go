@@ -101,6 +101,7 @@ type ui struct {
 	loadingMore bool  // идёт подгрузка старых сообщений (докрутка истории)
 	noMore      bool  // сервер вернул пусто — достигнуто начало истории чата
 	nextTempID  int64 // счётчик временных ID для оптимистичного эха (убывает от 0)
+	treeDirty   bool  // дерево чатов требует пересборки при следующем показе
 
 	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
 	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
@@ -551,6 +552,10 @@ func (u *ui) root() *tview.Flex {
 func (u *ui) rebuildMid() {
 	u.mid.Clear()
 	if u.showTree {
+		if u.treeDirty { // накопленные изменения (прочитан чат, новые сообщения)
+			u.treeDirty = false
+			u.buildTree()
+		}
 		u.mid.AddItem(u.tree, 0, 1, false)
 		return
 	}
@@ -700,8 +705,8 @@ func (u *ui) recolorTree() {
 	}
 	root.SetColor(tcell.GetColor(theme.TextBright))
 	catColor := map[string]string{
-		"★ Избранное":     theme.Warn,
-		"● Непрочитанные": kindColor("unread"),
+		"★ Избранное": theme.Warn,
+		"🔔 Активные":  kindColor("unread"),
 	}
 	for _, g := range kindOrder {
 		catColor[strings.TrimSpace(g.label)] = kindColor(g.key)
@@ -920,6 +925,9 @@ func (u *ui) loadForum(node *tview.TreeNode, d telegram.Dialog) {
 }
 
 func (u *ui) buildTree() {
+	// Запоминаем раскрытые категории и выбранный узел, чтобы восстановить их после
+	// пересборки (при первом построении карта пуста — значит всё свёрнуто).
+	prevExpanded, prevSel := u.captureTreeState()
 	// Узлы пересоздаются — сбрасываем отметки загруженных форумов, иначе заглушка
 	// «…» залипнет (loadForum посчитает темы уже загруженными).
 	u.forumLoaded = map[string]bool{}
@@ -934,7 +942,7 @@ func (u *ui) buildTree() {
 	// ★ Избранное — локальные закладки (свои имена, хранятся в конфиге).
 	if u.cfg != nil && len(u.cfg.Bookmarks) > 0 {
 		cat := tview.NewTreeNode(treeLine("★ Избранное", fmt.Sprintf("(%d)", len(u.cfg.Bookmarks)), u.treeAvail(1))).
-			SetColor(tcell.GetColor(theme.Warn)).SetSelectable(true).SetExpanded(true)
+			SetColor(tcell.GetColor(theme.Warn)).SetSelectable(true)
 		for _, b := range u.cfg.Bookmarks {
 			cat.AddChild(u.chatNode(u.bookmarkDialog(b)))
 		}
@@ -942,18 +950,20 @@ func (u *ui) buildTree() {
 		u.favNode = cat
 	}
 
-	// ● Непрочитанные — сводная закладка: чаты с непрочитанными, не в муте.
-	var unread []telegram.Dialog
+	// 🔔 Активные — незамьюченные чаты с непрочитанными или только что пришедшим
+	// сообщением. Счётчик растёт по мере прихода новых (см. listenUpdates), чаты
+	// показываются цветами своих групп (chatNode красит по Kind).
+	var active []telegram.Dialog
 	for _, d := range u.dialogs {
 		if d.Unread > 0 && !d.Muted {
-			unread = append(unread, d)
+			active = append(active, d)
 		}
 	}
-	if len(unread) > 0 {
-		cat := tview.NewTreeNode(treeLine("● Непрочитанные", fmt.Sprintf("(%d)", len(unread)), u.treeAvail(1))).
-			SetColor(tcell.GetColor(kindColor("unread"))).SetSelectable(true).SetExpanded(true)
-		for i := range unread {
-			cat.AddChild(u.chatNode(unread[i]))
+	if len(active) > 0 {
+		cat := tview.NewTreeNode(treeLine("🔔 Активные", fmt.Sprintf("(%d)", len(active)), u.treeAvail(1))).
+			SetColor(tcell.GetColor(kindColor("unread"))).SetSelectable(true)
+		for i := range active {
+			cat.AddChild(u.chatNode(active[i]))
 		}
 		root.AddChild(cat)
 	}
@@ -984,7 +994,75 @@ func (u *ui) buildTree() {
 		}
 		root.AddChild(cat)
 	}
-	u.tree.SetRoot(root).SetCurrentNode(root)
+	u.tree.SetRoot(root)
+	u.applyTreeState(root, prevExpanded, prevSel)
+}
+
+// stableLabel возвращает устойчивую подпись категории без счётчика «(N)» —
+// для сопоставления узлов между пересборками дерева.
+func stableLabel(text string) string {
+	t := strings.TrimSpace(text)
+	if i := strings.LastIndex(t, "("); i > 0 {
+		t = strings.TrimSpace(t[:i])
+	}
+	return t
+}
+
+// nodeIdentity — устойчивый идентификатор узла: чат по ключу+теме либо категория
+// по подписи.
+func (u *ui) nodeIdentity(n *tview.TreeNode) string {
+	if d, ok := n.GetReference().(*telegram.Dialog); ok {
+		return "chat:" + d.Ref.Key() + ":" + strconv.Itoa(d.TopicID)
+	}
+	return "cat:" + stableLabel(n.GetText())
+}
+
+// captureTreeState запоминает раскрытые категории и выбранный узел перед
+// пересборкой дерева.
+func (u *ui) captureTreeState() (expanded map[string]bool, selected string) {
+	expanded = map[string]bool{}
+	root := u.tree.GetRoot()
+	if root == nil {
+		return expanded, ""
+	}
+	for _, child := range root.GetChildren() {
+		if len(child.GetChildren()) > 0 {
+			expanded[stableLabel(child.GetText())] = child.IsExpanded()
+		}
+	}
+	if cur := u.tree.GetCurrentNode(); cur != nil && cur != root {
+		selected = u.nodeIdentity(cur)
+	}
+	return expanded, selected
+}
+
+// applyTreeState восстанавливает раскрытие категорий и выбранный узел. Категории
+// без записи (новые или сразу после старта) остаются свёрнутыми — поэтому при
+// запуске всё свёрнуто.
+func (u *ui) applyTreeState(root *tview.TreeNode, expanded map[string]bool, selected string) {
+	for _, child := range root.GetChildren() {
+		if len(child.GetChildren()) > 0 {
+			child.SetExpanded(expanded[stableLabel(child.GetText())])
+		}
+	}
+	var selNode *tview.TreeNode
+	if selected != "" {
+		root.Walk(func(n, _ *tview.TreeNode) bool {
+			if n == root {
+				return true
+			}
+			if u.nodeIdentity(n) == selected {
+				selNode = n
+				return false
+			}
+			return true
+		})
+	}
+	if selNode != nil {
+		u.tree.SetCurrentNode(selNode)
+	} else {
+		u.tree.SetCurrentNode(root)
+	}
 }
 
 // chatNode строит узел-лист чата второго уровня: цвет по типу, счётчик
@@ -1009,6 +1087,14 @@ func (u *ui) chatNode(d telegram.Dialog) *tview.TreeNode {
 func (u *ui) openChat(d telegram.Dialog) {
 	dd := d
 	u.open = &dd
+	// Открыли чат — локально считаем его прочитанным: он уходит из «Активных»
+	// (дерево пересоберётся при следующем показе списка).
+	if dd.TopicID == 0 {
+		if ld := u.dialogByKey(dd.Ref.Key()); ld != nil && ld.Unread > 0 {
+			ld.Unread = 0
+			u.treeDirty = true
+		}
+	}
 	u.history = nil
 	u.messages.invalidate()
 	u.noMore = false
@@ -1091,6 +1177,14 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 					u.messages.invalidate()
 				}
 			} else if !nm.Message.Out {
+				// Входящее в другой (незамьюченный) чат — поднимаем «Активные».
+				if u.markChatActive(nm.PeerKey) {
+					if u.showTree {
+						u.buildTree() // список открыт — обновляем сразу
+					} else {
+						u.treeDirty = true // обновим при возврате к списку
+					}
+				}
 				u.status.SetText(" [" + theme.Accent + "::b]● НОВОЕ[-:-:-] " + statusHints())
 			}
 		})
@@ -1150,6 +1244,18 @@ func (u *ui) hasMessageID(id int64) bool {
 		}
 	}
 	return false
+}
+
+// markChatActive повышает счётчик непрочитанных чата по ключу (для раздела
+// «Активные»). Возвращает true, если чат найден и не в муте — тогда дерево стоит
+// пересобрать. Чужие/незагруженные чаты и муты игнорируются.
+func (u *ui) markChatActive(key string) bool {
+	d := u.dialogByKey(key)
+	if d == nil || d.Muted {
+		return false
+	}
+	d.Unread++
+	return true
 }
 
 // markSendStatus меняет статус сообщения с временным ID tempID (оптимистичное эхо).
