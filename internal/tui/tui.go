@@ -28,8 +28,8 @@ import (
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
-// Категории аккордеона в порядке отображения. Saved Messages выводится
-// отдельным узлом (см. buildTree), поэтому "self" здесь нет.
+// Категории аккордеона в порядке отображения. Saved Messages всегда живёт в
+// разделе «★ Избранное» (см. buildTree), поэтому "self" здесь нет.
 var kindOrder = []struct{ key, label string }{
 	{"user", "👤 Люди"},
 	{"bot", "🤖 Боты"},
@@ -1005,12 +1005,34 @@ func (u *ui) buildTree() {
 	root := tview.NewTreeNode("Закладки").SetSelectable(false).
 		SetColor(tcell.GetColor(theme.TextBright))
 
-	// ★ Избранное — локальные закладки (свои имена, хранятся в конфиге).
-	if u.cfg != nil && len(u.cfg.Bookmarks) > 0 {
-		cat := tview.NewTreeNode(treeLine("★ Избранное", fmt.Sprintf("(%d)", len(u.cfg.Bookmarks)), u.treeAvail(1))).
+	// ★ Избранное — закреплённые чаты. Saved Messages всегда первым и убрать его
+	// нельзя; ниже — локальные закладки (свои имена, хранятся в конфиге).
+	var saved *telegram.Dialog
+	for i := range u.dialogs {
+		if groupKey(u.dialogs[i]) == "self" {
+			sd := u.dialogs[i]
+			saved = &sd
+			break
+		}
+	}
+	nBookmarks := 0
+	if u.cfg != nil {
+		nBookmarks = len(u.cfg.Bookmarks)
+	}
+	if saved != nil || nBookmarks > 0 {
+		n := nBookmarks
+		if saved != nil {
+			n++
+		}
+		cat := tview.NewTreeNode(treeLine("★ Избранное", fmt.Sprintf("(%d)", n), u.treeAvail(1))).
 			SetColor(tcell.GetColor(theme.Warn)).SetSelectable(true)
-		for _, b := range u.cfg.Bookmarks {
-			cat.AddChild(u.chatNode(u.bookmarkDialog(b)))
+		if saved != nil {
+			cat.AddChild(u.savedNode(*saved))
+		}
+		if u.cfg != nil {
+			for _, b := range u.cfg.Bookmarks {
+				cat.AddChild(u.chatNode(u.bookmarkDialog(b)))
+			}
 		}
 		root.AddChild(cat)
 		u.favNode = cat
@@ -1032,20 +1054,6 @@ func (u *ui) buildTree() {
 			cat.AddChild(u.chatNode(active[i]))
 		}
 		root.AddChild(cat)
-	}
-
-	// 💾 Saved Messages — отдельной строкой верхнего уровня (а не категорией).
-	for i := range u.dialogs {
-		if u.dialogs[i].Kind == "self" {
-			sd := u.dialogs[i]
-			count := ""
-			if sd.Unread > 0 {
-				count = fmt.Sprintf("(%d)", sd.Unread)
-			}
-			root.AddChild(tview.NewTreeNode(treeRow("💾 Saved Messages", "", count, u.treeAvail(1))).
-				SetReference(&sd).SetColor(tcell.GetColor(kindColor("self"))))
-			break
-		}
 	}
 
 	for _, g := range kindOrder {
@@ -1129,6 +1137,18 @@ func (u *ui) applyTreeState(root *tview.TreeNode, expanded map[string]bool, sele
 	} else {
 		u.tree.SetCurrentNode(root)
 	}
+}
+
+// savedNode строит узел Saved Messages внутри «★ Избранное»: своё имя 💾, цвет
+// self, счётчик непрочитанных справа. Из избранного его убрать нельзя (см.
+// removeBookmarkNode).
+func (u *ui) savedNode(d telegram.Dialog) *tview.TreeNode {
+	count := ""
+	if d.Unread > 0 {
+		count = fmt.Sprintf("(%d)", d.Unread)
+	}
+	return tview.NewTreeNode(treeRow("💾 Saved Messages", "", count, u.treeAvail(2))).
+		SetReference(&d).SetColor(tcell.GetColor(kindColor("self")))
 }
 
 // chatNode строит узел-лист чата второго уровня: цвет по типу, счётчик

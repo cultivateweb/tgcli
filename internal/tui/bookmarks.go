@@ -77,7 +77,7 @@ func (u *ui) bookmarkCurrent() {
 	if d == nil {
 		return
 	}
-	if u.isBookmarked(d.Ref.Key()) {
+	if groupKey(*d) == "self" || u.isBookmarked(d.Ref.Key()) {
 		u.status.SetText("[" + theme.Warn + "]Уже в избранном[-]")
 		return
 	}
@@ -116,6 +116,10 @@ func (u *ui) removeBookmarkNode(node *tview.TreeNode) {
 	}
 	d, ok := node.GetReference().(*telegram.Dialog)
 	if !ok {
+		return
+	}
+	if groupKey(*d) == "self" { // Saved Messages закреплён навсегда — не убираем
+		u.status.SetText("[" + theme.Warn + "]Saved Messages убрать нельзя[-]")
 		return
 	}
 	key, name := d.Ref.Key(), d.Title
