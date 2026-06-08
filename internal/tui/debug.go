@@ -14,15 +14,29 @@ import (
 	"time"
 )
 
-// dumpStacks пишет стеки всех горутин в /tmp/tgcli-freeze-<unix>.log.
+// dumpStacks пишет стеки всех горутин в tgcli-freeze-<unix>.log в каталоге
+// конфига ($HOME/.config/tgcli). Раньше писал в /tmp, но на Fedora это tmpfs в
+// RAM и дамп пропадал при перезагрузке — а он нужен именно для разбора фриза.
 func dumpStacks(reason string) string {
 	buf := make([]byte, 8<<20)
 	n := runtime.Stack(buf, true)
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("tgcli-freeze-%d.log", time.Now().Unix()))
+	path := filepath.Join(dumpDir(), fmt.Sprintf("tgcli-freeze-%d.log", time.Now().Unix()))
 	body := append([]byte("причина: "+reason+"\nвремя: "+time.Now().Format(time.RFC3339)+"\n\n"), buf[:n]...)
 	_ = os.WriteFile(path, body, 0o644)
 	fmt.Fprintln(os.Stderr, "tgcli: снят дамп горутин →", path)
 	return path
+}
+
+// dumpDir выбирает каталог для дампов: каталог конфига (переживает ребут),
+// с откатом на временный каталог, если конфиг недоступен.
+func dumpDir() string {
+	if d, err := os.UserConfigDir(); err == nil {
+		p := filepath.Join(d, "tgcli")
+		if os.MkdirAll(p, 0o700) == nil {
+			return p
+		}
+	}
+	return os.TempDir()
 }
 
 // startDiagnostics запускает сторож зависаний и обработчик SIGUSR1. Оба пишут
