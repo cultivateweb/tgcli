@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/cultivateweb/tgcli/internal/ipc"
 	"github.com/cultivateweb/tgcli/internal/telegram"
 )
 
@@ -23,6 +25,13 @@ func statusCmd() *Command {
 				return nil
 			}
 			fmt.Printf("Авторизован: %s\n", telegram.DisplayName(self))
+
+			if st, err := ipc.Status(env.Config.SocketPath()); err == nil {
+				fmt.Printf("Демон: онлайн (аптайм %s, подписчиков %d)\n",
+					time.Since(st.StartedAt).Round(time.Second), st.Subscribers)
+			} else {
+				fmt.Println("Демон: не запущен")
+			}
 			return nil
 		},
 	}

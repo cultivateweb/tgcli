@@ -22,6 +22,8 @@ func commands() []*Command {
 	return []*Command{
 		authCmd(),
 		chatsCmd(),
+		daemonCmd(),
+		eventsCmd(),
 		readCmd(),
 		sendCmd(),
 		statusCmd(),

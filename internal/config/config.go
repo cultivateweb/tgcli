@@ -104,6 +104,17 @@ func (c *Config) CachePath() string {
 	return filepath.Join(filepath.Dir(c.path), "cache.db")
 }
 
+// SocketPath — путь к unix-сокету демона (резидента), рядом с конфигом.
+// Клиенты (events, status) подключаются к нему, демон на нём слушает.
+func (c *Config) SocketPath() string {
+	return filepath.Join(filepath.Dir(c.path), "daemon.sock")
+}
+
+// PidPath — путь к pid-файлу демона (защита от второго экземпляра), рядом с конфигом.
+func (c *Config) PidPath() string {
+	return filepath.Join(filepath.Dir(c.path), "daemon.pid")
+}
+
 // DefaultPath возвращает путь к файлу конфигурации по умолчанию.
 func DefaultPath() (string, error) {
 	dir, err := os.UserConfigDir()
