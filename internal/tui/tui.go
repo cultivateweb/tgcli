@@ -103,10 +103,11 @@ type ui struct {
 	nextTempID  int64 // счётчик временных ID для оптимистичного эха (убывает от 0)
 	treeDirty   bool  // дерево чатов требует пересборки при следующем показе
 
-	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
-	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
-	treeWidth   int                 // текущая внутренняя ширина панели «Чаты» (для выравнивания)
-	favNode     *tview.TreeNode     // узел категории «★ Избранное» (для удаления закладок по d)
+	forumLoaded   map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
+	downloads     map[int64]*download // активные загрузки вложений (по ID сообщения)
+	treeWidth     int                 // текущая внутренняя ширина панели «Чаты» (для выравнивания)
+	favNode       *tview.TreeNode     // узел категории «★ Избранное» (для удаления закладок по d)
+	savedTreeNode *tview.TreeNode     // узел «💾 Saved Messages» внутри избранного (убрать нельзя)
 }
 
 // Run строит и запускает интерфейс. c, cfg и updates могут быть nil.
@@ -119,6 +120,7 @@ func Run(ctx context.Context, sess *telegram.Session, c *cache.Cache, cfg *confi
 	u := &ui{ctx: ctx, sess: sess, cache: c, cfg: cfg, version: version,
 		app: tview.NewApplication(), selected: map[int]bool{}, treeWidth: 48,
 		forumLoaded: map[string]bool{}, downloads: map[int64]*download{}, menuActive: -1}
+	u.pruneSelfBookmarks() // Saved Messages теперь всегда в избранном автоматически
 	u.build()
 	u.pages = tview.NewPages().AddPage("main", u.root(), true, true)
 
@@ -998,6 +1000,7 @@ func (u *ui) buildTree() {
 	// «…» залипнет (loadForum посчитает темы уже загруженными).
 	u.forumLoaded = map[string]bool{}
 	u.favNode = nil
+	u.savedTreeNode = nil
 	groups := map[string][]telegram.Dialog{}
 	for _, d := range u.dialogs {
 		groups[groupKey(d)] = append(groups[groupKey(d)], d)
@@ -1027,7 +1030,8 @@ func (u *ui) buildTree() {
 		cat := tview.NewTreeNode(treeLine("★ Избранное", fmt.Sprintf("(%d)", n), u.treeAvail(1))).
 			SetColor(tcell.GetColor(theme.Warn)).SetSelectable(true)
 		if saved != nil {
-			cat.AddChild(u.savedNode(*saved))
+			u.savedTreeNode = u.savedNode(*saved)
+			cat.AddChild(u.savedTreeNode)
 		}
 		if u.cfg != nil {
 			for _, b := range u.cfg.Bookmarks {

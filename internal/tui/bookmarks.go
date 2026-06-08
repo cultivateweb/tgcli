@@ -114,12 +114,12 @@ func (u *ui) removeBookmarkNode(node *tview.TreeNode) {
 	if node == nil || u.favNode == nil || u.treeParent(node) != u.favNode {
 		return
 	}
-	d, ok := node.GetReference().(*telegram.Dialog)
-	if !ok {
+	if node == u.savedTreeNode { // авто-узел Saved Messages закреплён навсегда
+		u.status.SetText("[" + theme.Warn + "]Saved Messages убрать нельзя[-]")
 		return
 	}
-	if groupKey(*d) == "self" { // Saved Messages закреплён навсегда — не убираем
-		u.status.SetText("[" + theme.Warn + "]Saved Messages убрать нельзя[-]")
+	d, ok := node.GetReference().(*telegram.Dialog)
+	if !ok {
 		return
 	}
 	key, name := d.Ref.Key(), d.Title
@@ -143,6 +143,29 @@ func (u *ui) removeBookmark(key string) {
 	u.saveConfig()
 	u.buildTree()
 	u.status.SetText("[" + theme.Success + "]Убрано из избранного[-]")
+}
+
+// pruneSelfBookmarks убирает из конфига закладки на Saved Messages (kind/peer_type
+// == "self"). Они стали лишними: Saved Messages теперь всегда показывается в
+// «★ Избранное» автоматически. Чистка одноразовая — если что-то удалено, конфиг
+// пересохраняется.
+func (u *ui) pruneSelfBookmarks() {
+	if u.cfg == nil {
+		return
+	}
+	kept := u.cfg.Bookmarks[:0]
+	removed := false
+	for _, b := range u.cfg.Bookmarks {
+		if b.Kind == "self" || b.PeerType == "self" {
+			removed = true
+			continue
+		}
+		kept = append(kept, b)
+	}
+	if removed {
+		u.cfg.Bookmarks = kept
+		u.saveConfig()
+	}
 }
 
 // saveConfig пишет конфиг в фоне (не блокируя UI).
