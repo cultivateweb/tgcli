@@ -27,11 +27,17 @@ type Dialog struct {
 	Unread  int       `json:"unread"`
 	Date    time.Time `json:"date"`
 	Preview string    `json:"preview"`
-	CanSend bool      `json:"can_send"` // можно ли писать в этот чат
-	Mine    bool      `json:"mine"`     // я создатель (для групп/каналов)
-	Muted   bool      `json:"muted"`    // уведомления выключены (в муте)
-	Forum   bool      `json:"forum"`    // супергруппа-форум (есть темы)
-	Ref     PeerRef   `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
+
+	// ReadOutboxMaxID — максимальный ID исходящего сообщения, прочитанного
+	// собеседником. Сообщение с ID ≤ этого значения считается прочитанным
+	// (статус «✓✓ прочитано»), большее — просто отправленным («✓»).
+	ReadOutboxMaxID int64 `json:"read_outbox_max_id,omitempty"`
+
+	CanSend bool    `json:"can_send"` // можно ли писать в этот чат
+	Mine    bool    `json:"mine"`     // я создатель (для групп/каналов)
+	Muted   bool    `json:"muted"`    // уведомления выключены (в муте)
+	Forum   bool    `json:"forum"`    // супергруппа-форум (есть темы)
+	Ref     PeerRef `json:"peer"`     // сериализуемая ссылка на чат (для кеша)
 
 	// TopicID/TopicTitle непусты, когда диалог адресует тему форума, а не сам
 	// чат: история и отправка идут через тред темы.
@@ -93,12 +99,23 @@ func peerRefFrom(p tg.InputPeerClass) PeerRef {
 	return PeerRef{}
 }
 
+// MsgStatus — статус доставки исходящего сообщения (для входящих — StatusNone).
+type MsgStatus string
+
+const (
+	StatusNone    MsgStatus = ""        // входящее — статус не показываем
+	StatusSending MsgStatus = "sending" // отправляется (локальное эхо без серверного ID)
+	StatusError   MsgStatus = "error"   // ошибка отправки
+	StatusSent    MsgStatus = "sent"    // принято сервером, ещё не прочитано (✓)
+	StatusRead    MsgStatus = "read"    // прочитано собеседником (✓✓)
+)
+
 // HistoryMessage — сообщение из истории чата (команда read).
 type HistoryMessage struct {
 	ID     int64     `json:"id"`
 	Date   time.Time `json:"date"`
 	Author string    `json:"author"`
-	Out    bool      `json:"out"` // исходящее (отправлено мной)
+	Out    bool      `json:"out"`  // исходящее (отправлено мной)
 	Text   string    `json:"text"` // plain-текст (для копирования/цитаты/превью)
 
 	// Spans — текст, разбитый на форматированные сегменты (из entities Telegram).
@@ -106,6 +123,10 @@ type HistoryMessage struct {
 	Spans []Span `json:"spans,omitempty"`
 	// Media — описание вложения (фото/файл/видео…), nil если вложения нет.
 	Media *Media `json:"media,omitempty"`
+
+	// Status — статус доставки исходящего сообщения. Не сериализуется: read-state
+	// меняется со временем, поэтому вычисляется заново в TUI из ReadOutboxMaxID.
+	Status MsgStatus `json:"-"`
 }
 
 // Plain возвращает текст сообщения без разметки для копирования/цитаты:
@@ -137,7 +158,7 @@ type Span struct {
 // сообщение перезапрашивается заново (DownloadMedia), чтобы file_reference был
 // свежим.
 type Media struct {
-	Kind     string `json:"kind"`               // photo, video, audio, voice, gif, sticker, document
+	Kind     string `json:"kind"` // photo, video, audio, voice, gif, sticker, document
 	FileName string `json:"file_name,omitempty"`
 	MIME     string `json:"mime,omitempty"`
 	Size     int64  `json:"size,omitempty"`

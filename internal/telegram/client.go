@@ -436,11 +436,27 @@ func (s *Session) SendToPeer(ctx context.Context, peer tg.InputPeerClass, text s
 // HistoryByPeer возвращает последние limit сообщений чата по готовому peer
 // (старые сверху).
 func (s *Session) HistoryByPeer(ctx context.Context, peer tg.InputPeerClass, limit int) ([]HistoryMessage, error) {
+	return s.HistoryBeforeID(ctx, peer, 0, limit)
+}
+
+// HistoryBeforeID возвращает limit сообщений чата старше beforeID (для докрутки
+// истории в прошлое). beforeID==0 означает «с самых свежих». Результат развёрнут
+// старые-сверху, как у HistoryByPeer.
+func (s *Session) HistoryBeforeID(ctx context.Context, peer tg.InputPeerClass, beforeID int64, limit int) ([]HistoryMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	b := messages.NewQueryBuilder(s.api).GetHistory(peer).BatchSize(limit)
+	if beforeID > 0 {
+		b = b.OffsetID(int(beforeID)) // только сообщения старше beforeID
+	}
+	return collectHistory(ctx, b.Iter(), limit)
+}
+
+// collectHistory вычитывает из итератора до limit сообщений (пропуская служебные)
+// и разворачивает их порядок на старые-сверху.
+func collectHistory(ctx context.Context, iter *messages.Iterator, limit int) ([]HistoryMessage, error) {
 	var out []HistoryMessage
-	iter := messages.NewQueryBuilder(s.api).GetHistory(peer).BatchSize(limit).Iter()
 	for len(out) < limit && iter.Next(ctx) {
 		if hm, ok := historyFromElem(iter.Value()); ok {
 			out = append(out, hm)

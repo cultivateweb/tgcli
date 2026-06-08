@@ -39,23 +39,21 @@ func (s *Session) ForumTopics(ctx context.Context, peer tg.InputPeerClass, limit
 // HistoryByTopic загружает сообщения темы (тред ответов на корень темы),
 // развёрнутые старые-сверху.
 func (s *Session) HistoryByTopic(ctx context.Context, peer tg.InputPeerClass, topicID, limit int) ([]HistoryMessage, error) {
+	return s.HistoryByTopicBeforeID(ctx, peer, topicID, 0, limit)
+}
+
+// HistoryByTopicBeforeID — как HistoryByTopic, но возвращает сообщения темы
+// старше beforeID (для докрутки истории темы в прошлое). beforeID==0 — с самых
+// свежих.
+func (s *Session) HistoryByTopicBeforeID(ctx context.Context, peer tg.InputPeerClass, topicID int, beforeID int64, limit int) ([]HistoryMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	var out []HistoryMessage
-	iter := messages.NewQueryBuilder(s.api).GetReplies(peer).MsgID(topicID).BatchSize(limit).Iter()
-	for len(out) < limit && iter.Next(ctx) {
-		if hm, ok := historyFromElem(iter.Value()); ok {
-			out = append(out, hm)
-		}
+	b := messages.NewQueryBuilder(s.api).GetReplies(peer).MsgID(topicID).BatchSize(limit)
+	if beforeID > 0 {
+		b = b.OffsetID(int(beforeID))
 	}
-	if err := iter.Err(); err != nil {
-		return nil, err
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, nil
+	return collectHistory(ctx, b.Iter(), limit)
 }
 
 // SendToTopic отправляет сообщение в тему форума (reply_to на корень темы).

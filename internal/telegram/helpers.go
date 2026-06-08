@@ -89,6 +89,7 @@ func dialogFromElem(e dialogs.Elem) Dialog {
 	d.Ref = peerRefFrom(e.Peer)
 	if dlg, ok := e.Dialog.(*tg.Dialog); ok {
 		d.Unread = dlg.UnreadCount
+		d.ReadOutboxMaxID = int64(dlg.ReadOutboxMaxID)
 		if mu, ok := dlg.NotifySettings.GetMuteUntil(); ok && int64(mu) > time.Now().Unix() {
 			d.Muted = true
 		}
