@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/atotto/clipboard"
@@ -96,6 +97,10 @@ type ui struct {
 	msgSel   int          // индекс выбранного сообщения
 	msgElem  int          // индекс элемента внутри сообщения (Tab: текст/ссылка/вложение)
 	selected map[int]bool // мультивыбор сообщений
+
+	loadingMore bool  // идёт подгрузка старых сообщений (докрутка истории)
+	noMore      bool  // сервер вернул пусто — достигнуто начало истории чата
+	nextTempID  int64 // счётчик временных ID для оптимистичного эха (убывает от 0)
 
 	forumLoaded map[string]bool     // ключи супергрупп-форумов, чьи темы загружены
 	downloads   map[int64]*download // активные загрузки вложений (по ID сообщения)
@@ -353,6 +358,9 @@ func (u *ui) build() {
 		case 'o':
 			u.elemOpen() // открыть: ссылку в браузере или скачать вложение
 			return nil
+		case 'v':
+			u.enterCopyMode() // выделить и скопировать часть текста сообщения
+			return nil
 		}
 		return ev
 	})
@@ -372,7 +380,7 @@ func (u *ui) build() {
 		if ev.Key() == tcell.KeyEnter && ev.Modifiers()&tcell.ModAlt == 0 {
 			text := strings.TrimSpace(u.input.GetText())
 			if text != "" && u.open != nil && u.open.CanSend {
-				go u.sendMessage(*u.open, text)
+				u.submitMessage(text)
 			}
 			return nil
 		}
@@ -450,7 +458,7 @@ func (u *ui) build() {
 	u.app.SetInputCapture(func(ev *tcell.EventKey) *tcell.EventKey {
 		// При открытом модальном окне (диалог/просмотр/ввод) все клавиши идут
 		// в него — глобальные хоткеи не вмешиваются.
-		if u.pages != nil && (u.pages.HasPage("dialog") || u.pages.HasPage("viewer") || u.pages.HasPage("prompt")) {
+		if u.pages != nil && (u.pages.HasPage("dialog") || u.pages.HasPage("viewer") || u.pages.HasPage("prompt") || u.pages.HasPage("copy")) {
 			return ev
 		}
 		// Alt+буква: открыть пункт меню по «горячей» букве; Alt+X — выход.
@@ -676,8 +684,9 @@ func (u *ui) restyle() {
 	barBg := tcell.GetColor(theme.BarBg)
 	u.status.SetBackgroundColor(barBg)
 	u.header.SetBackgroundColor(barBg)
-	u.renderMenuBar() // акселераторы бара берут цвета из темы
-	u.recolorTree()   // перекрасить узлы дерева, не теряя раскрытие/выбор
+	u.renderMenuBar()       // акселераторы бара берут цвета из темы
+	u.recolorTree()         // перекрасить узлы дерева, не теряя раскрытие/выбор
+	u.messages.invalidate() // кеш ленты держит старые цвета — пересобрать
 	// Перерисовку делает событийный цикл tview после обработчика (как в toggleTree).
 }
 
@@ -1001,6 +1010,9 @@ func (u *ui) openChat(d telegram.Dialog) {
 	dd := d
 	u.open = &dd
 	u.history = nil
+	u.messages.invalidate()
+	u.noMore = false
+	u.loadingMore = false
 	u.msgSel = -1
 	u.msgElem = 0
 	u.messages.offset = 0
@@ -1065,32 +1077,19 @@ func (u *ui) sameChat(d telegram.Dialog) bool {
 	return u.open != nil && u.open.Ref.Key() == d.Ref.Key() && u.open.TopicID == d.TopicID
 }
 
-func (u *ui) sendMessage(d telegram.Dialog, text string) {
-	var err error
-	if d.TopicID != 0 {
-		_, err = u.sess.SendToTopic(u.ctx, d.Peer, d.TopicID, text)
-	} else {
-		_, err = u.sess.SendToPeer(u.ctx, d.Peer, text)
-	}
-	u.app.QueueUpdateDraw(func() {
-		if err != nil {
-			u.status.SetText("[" + theme.ErrorC + "]Ошибка отправки: " + tview.Escape(err.Error()))
-			return
-		}
-		u.input.SetText("", false)
-		u.status.SetText(inputHints())
-	})
-	if err == nil {
-		go u.reloadHistory(d)
-	}
-}
-
 func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 	for nm := range updates {
 		nm := nm
 		u.app.QueueUpdateDraw(func() {
 			if u.open != nil && u.open.TopicID == 0 && nm.PeerKey == u.open.Ref.Key() {
-				u.history = append(u.history, nm.Message)
+				// Своё отправленное сообщение приходит и из reloadHistory, и из
+				// потока обновлений — дедупим по ID, чтобы не задвоить.
+				if !u.hasMessageID(nm.Message.ID) {
+					m := nm.Message
+					m.Status = u.statusFor(m)
+					u.history = append(u.history, m)
+					u.messages.invalidate()
+				}
 			} else if !nm.Message.Out {
 				u.status.SetText(" [" + theme.Accent + "::b]● НОВОЕ[-:-:-] " + statusHints())
 			}
@@ -1105,9 +1104,108 @@ func (u *ui) listenUpdates(updates <-chan telegram.NewMessage) {
 // messages при следующем Draw.
 func (u *ui) setHistory(h []telegram.HistoryMessage) {
 	u.history = h
+	u.applyStatuses()
+	u.messages.invalidate()
 	if u.msgSel < 0 || u.msgSel >= len(h) {
 		u.msgSel = len(h) - 1
 	}
+}
+
+// statusFor вычисляет статус доставки сообщения: для входящих — пусто; для
+// исходящих — «отправляется» (нет серверного ID), «прочитано» (ID в пределах
+// ReadOutboxMaxID собеседника) или «отправлено».
+func (u *ui) statusFor(m telegram.HistoryMessage) telegram.MsgStatus {
+	if !m.Out {
+		return telegram.StatusNone
+	}
+	if m.ID <= 0 {
+		return telegram.StatusSending // локальное эхо без подтверждения сервера
+	}
+	if u.open != nil && m.ID <= u.open.ReadOutboxMaxID {
+		return telegram.StatusRead
+	}
+	return telegram.StatusSent
+}
+
+// applyStatuses проставляет статус каждому сообщению истории. Сообщения с уже
+// зафиксированной ошибкой отправки не трогаются.
+func (u *ui) applyStatuses() {
+	for i := range u.history {
+		if u.history[i].Status == telegram.StatusError {
+			continue
+		}
+		u.history[i].Status = u.statusFor(u.history[i])
+	}
+}
+
+// hasMessageID сообщает, есть ли в истории сообщение с таким ID (для дедупа
+// своих сообщений, приходящих и из reload, и из потока обновлений).
+func (u *ui) hasMessageID(id int64) bool {
+	if id == 0 {
+		return false
+	}
+	for i := range u.history {
+		if u.history[i].ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// markSendStatus меняет статус сообщения с временным ID tempID (оптимистичное эхо).
+func (u *ui) markSendStatus(tempID int64, st telegram.MsgStatus) {
+	for i := range u.history {
+		if u.history[i].ID == tempID {
+			u.history[i].Status = st
+			u.messages.invalidate()
+			return
+		}
+	}
+}
+
+// submitMessage отправляет текст в открытый чат с оптимистичным эхом: сообщение
+// сразу появляется в ленте со статусом «отправляется», затем — «отправлено» (и
+// подтягивается реальное с сервера) либо «ошибка».
+func (u *ui) submitMessage(text string) {
+	if u.open == nil || !u.open.CanSend {
+		return
+	}
+	open := *u.open
+	u.nextTempID--
+	tempID := u.nextTempID
+	u.history = append(u.history, telegram.HistoryMessage{
+		ID:     tempID,
+		Date:   time.Now(),
+		Author: "Вы",
+		Out:    true,
+		Text:   text,
+		Status: telegram.StatusSending,
+	})
+	u.messages.invalidate()
+	u.input.SetText("", false)
+	u.msgSel = len(u.history) - 1
+	u.app.SetFocus(u.messages)
+	u.status.SetText("[" + theme.Info + "]Отправка…[-]")
+	go func() {
+		var err error
+		if open.TopicID != 0 {
+			_, err = u.sess.SendToTopic(u.ctx, open.Peer, open.TopicID, text)
+		} else {
+			_, err = u.sess.SendToPeer(u.ctx, open.Peer, text)
+		}
+		u.app.QueueUpdateDraw(func() {
+			if err != nil {
+				u.markSendStatus(tempID, telegram.StatusError)
+				u.status.SetText("[" + theme.ErrorC + "]Ошибка отправки: " + tview.Escape(err.Error()) + "[-]")
+				return
+			}
+			u.markSendStatus(tempID, telegram.StatusSent)
+			u.status.SetText(msgHints())
+		})
+		if err == nil {
+			go u.reloadHistory(open) // подтянуть реальное сообщение (серверный ID/статус)
+		}
+	}()
 }
 
 // showMessageViewer открывает полный текст сообщения в отдельном скроллируемом
@@ -1175,7 +1273,11 @@ func (u *ui) selectMsg(i int) {
 	u.msgSel = i
 	u.msgElem = 0 // при смене сообщения навигация по элементам — с начала
 	u.showElementHints()
-	// Отрисовку (полосу-курсор и прокрутку к выбранному) сделает примитов messages.
+	// Подходим к началу загруженного — подгружаем историю глубже (докрутка).
+	if u.msgSel < 10 {
+		u.loadOlder()
+	}
+	// Отрисовку (полосу-курсор и прокрутку к выбранному) сделает примитив messages.
 }
 
 func (u *ui) selectedIndices() []int {
@@ -1527,17 +1629,90 @@ func (u *ui) reloadHistory(d telegram.Dialog) {
 	})
 }
 
+// loadOlder подгружает порцию сообщений старше самого старого загруженного
+// (докрутка истории в прошлое) и дописывает их в начало u.history. Защита от
+// повторных и параллельных запусков — флаги loadingMore/noMore.
+func (u *ui) loadOlder() {
+	if u.loadingMore || u.noMore || u.open == nil || len(u.history) == 0 || u.sess == nil {
+		return
+	}
+	m := u.messages
+	// Запоминаем, на какой экранной строке сейчас выбранное сообщение — после
+	// подстановки старых сообщений вернём его туда же (плавная докрутка).
+	if u.msgSel >= 0 && u.msgSel < len(m.rowStart) {
+		m.savedScreenRow = m.rowStart[u.msgSel] - m.offset
+	} else {
+		m.savedScreenRow = 0
+	}
+	u.loadingMore = true
+	open := *u.open
+	beforeID := u.history[0].ID
+	u.status.SetText("[" + theme.Info + "]⬆ Загрузка истории…[-]")
+	go func() {
+		var (
+			older []telegram.HistoryMessage
+			err   error
+		)
+		if open.TopicID != 0 {
+			older, err = u.sess.HistoryByTopicBeforeID(u.ctx, open.Peer, open.TopicID, beforeID, 40)
+		} else {
+			older, err = u.sess.HistoryBeforeID(u.ctx, open.Peer, beforeID, 40)
+		}
+		u.app.QueueUpdateDraw(func() {
+			u.loadingMore = false
+			if !u.sameChat(open) {
+				return
+			}
+			if err != nil {
+				u.status.SetText("[" + theme.ErrorC + "]Ошибка докрутки: " + tview.Escape(err.Error()) + "[-]")
+				return
+			}
+			u.prependHistory(older)
+		})
+	}()
+}
+
+// prependHistory дописывает старые сообщения в начало истории, сдвигает индекс
+// выбранного и пересчитывает прокрутку так, чтобы выбранное осталось на прежней
+// экранной строке (плавная докрутка).
+func (u *ui) prependHistory(older []telegram.HistoryMessage) {
+	if len(older) == 0 {
+		u.noMore = true
+		u.status.SetText("[" + theme.TextDim + "]Это начало истории чата[-]  " + msgHints())
+		return
+	}
+	n := len(older)
+	u.history = append(older, u.history...)
+	u.applyStatuses()
+	u.msgSel += n
+	m := u.messages
+	m.invalidate()
+	// Пересобираем кеш сразу (под последние известные размеры панели) и ставим
+	// прокрутку так, чтобы выбранное сообщение осталось на прежней строке экрана.
+	if m.cacheW > 0 && m.cacheH > 0 {
+		m.ensureLayout(m.cacheW, m.cacheH)
+		if u.msgSel >= 0 && u.msgSel < len(m.rowStart) {
+			m.offset = m.rowStart[u.msgSel] - m.savedScreenRow
+			if m.offset < 0 {
+				m.offset = 0
+			}
+		}
+	}
+	u.status.SetText(fmt.Sprintf("[%s]+%d сообщений истории[-]  %s", theme.Success, n, msgHints()))
+}
+
 // showHelp показывает окно справки по горячим клавишам.
 func (u *ui) showHelp() {
 	help := "Чаты: ←→ свернуть/развернуть, Enter — открыть (список прячется)\n" +
 		"Ctrl+B — список чатов   Alt+I — панель информации\n" +
 		"\n" +
 		"Сообщения:\n" +
-		"↑↓/Home/End — выбор сообщения   Esc — назад к чатам\n" +
+		"↑↓/Home/End — выбор сообщения (вверх — докрутка истории)   Esc — к чатам\n" +
 		"Tab/Shift+Tab — элемент сообщения (текст/ссылка/вложение)\n" +
-		"c — копировать   r — цитировать   d — удалить   Spc — пометить\n" +
-		"o — открыть: ссылку в браузере / скачать вложение (повторно — пауза)\n" +
+		"c — копировать всё   v — выделить и скопировать часть   r — цитировать\n" +
+		"d — удалить   Spc — пометить   o — ссылка в браузере / скачать вложение\n" +
 		"F3 — полный текст сообщения   Enter — перейти к вводу\n" +
+		"Статус исходящих: ⧖ отправляется · ✓ отправлено · ✓✓ прочитано · ✗ ошибка\n" +
 		"\n" +
 		"Ввод: Enter — отправить, Alt+Enter — перенос, Esc — к сообщениям\n" +
 		"F1 — справка   F8 — тема   F10 — меню   Alt+X / Ctrl+C — выход"
@@ -1628,8 +1803,8 @@ func statusHints() string {
 
 func msgHints() string {
 	return borlandBar([][3]string{
-		{"tab", "Tab", "Элемент"}, {"copy", "c", "Копир"}, {"quote", "r", "Цитата"},
-		{"del", "d", "Удал"}, {"mark", "Spc", "Выбор"}, {"open", "o", "Откр"},
+		{"tab", "Tab", "Элемент"}, {"copy", "c", "Копир"}, {"vis", "v", "Выдел"},
+		{"quote", "r", "Цитата"}, {"del", "d", "Удал"}, {"open", "o", "Откр"},
 		{"back", "Esc", "Чаты"}, {"menu", "F10", "Меню"},
 	})
 }

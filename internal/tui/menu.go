@@ -275,7 +275,7 @@ func (u *ui) runStatusAction(id string) {
 	case "send":
 		text := strings.TrimSpace(u.input.GetText())
 		if text != "" && u.open != nil && u.open.CanSend {
-			go u.sendMessage(*u.open, text)
+			u.submitMessage(text)
 		}
 	case "theme":
 		u.cycleTheme()
