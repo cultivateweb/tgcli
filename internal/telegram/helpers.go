@@ -135,7 +135,82 @@ func historyFromElem(e messages.Elem) (HistoryMessage, bool) {
 	hm.Spans = spansFrom(msg.Message, msg.Entities)
 	hm.Media = mediaFrom(msg)
 	hm.Author = sanitize(messageAuthor(msg, e.Entities, e.Peer))
+	hm.Fwd = forwardFrom(msg, e.Entities)
 	return hm, true
+}
+
+// forwardFrom извлекает источник пересланного сообщения (nil, если не переслано).
+// Origin — отображаемое имя автора оригинала; From — чат, ОТКУДА сохранено
+// (savedFromPeer), он точнее для перехода, чем автор. Для скрытых отправителей
+// (forward с запретом ссылки на профиль) остаётся только имя без навигации.
+func forwardFrom(m *tg.Message, ent peer.Entities) *Forward {
+	h, ok := m.GetFwdFrom()
+	if !ok {
+		return nil
+	}
+	fw := &Forward{}
+	if id, ok := h.GetFromID(); ok {
+		fw.Origin, fw.Kind, fw.From = peerName(id, ent)
+	}
+	if fw.Origin == "" {
+		if name, ok := h.GetFromName(); ok {
+			fw.Origin = name
+		}
+	}
+	// savedFromPeer указывает именно на чат-источник (например, группу, из
+	// которой сохранено сообщение конкретного автора) — берём его для навигации.
+	if sp, ok := h.GetSavedFromPeer(); ok {
+		if name, kind, ref := peerName(sp, ent); ref.Type != "" {
+			fw.From = ref
+			if fw.Origin == "" {
+				fw.Origin, fw.Kind = name, kind
+			}
+		}
+	}
+	if id, ok := h.GetSavedFromMsgID(); ok {
+		fw.MsgID = int64(id)
+	}
+	fw.Origin = sanitize(fw.Origin)
+	if fw.Origin == "" {
+		fw.Origin = "скрытый аккаунт"
+	}
+	return fw
+}
+
+// peerName разрешает имя, тип и сериализуемую ссылку собеседника по tg.Peer
+// через известные entities. Если в entities записи нет, ссылка возвращается без
+// access_hash (навигация по ключу всё равно найдёт чат в загруженном списке).
+func peerName(p tg.PeerClass, ent peer.Entities) (name, kind string, ref PeerRef) {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		if u, ok := ent.User(v.UserID); ok {
+			kind = "user"
+			if u.Bot {
+				kind = "bot"
+			}
+			return DisplayName(u), kind, PeerRef{Type: "user", ID: u.ID, AccessHash: u.AccessHash}
+		}
+		return "", "user", PeerRef{Type: "user", ID: v.UserID}
+	case *tg.PeerChat:
+		if ch, ok := ent.Chat(v.ChatID); ok {
+			return ch.Title, "group", PeerRef{Type: "chat", ID: ch.ID}
+		}
+		return "", "group", PeerRef{Type: "chat", ID: v.ChatID}
+	case *tg.PeerChannel:
+		if ch, ok := ent.Channel(v.ChannelID); ok {
+			title := ch.Title
+			if ch.Username != "" {
+				title = "@" + ch.Username + " - " + ch.Title
+			}
+			kind = "channel"
+			if ch.Megagroup {
+				kind = "supergroup"
+			}
+			return title, kind, PeerRef{Type: "channel", ID: ch.ID, AccessHash: ch.AccessHash}
+		}
+		return "", "channel", PeerRef{Type: "channel", ID: v.ChannelID}
+	}
+	return "", "", PeerRef{}
 }
 
 // canSend определяет, может ли пользователь писать в чат. Для broadcast-каналов
@@ -316,6 +391,7 @@ func newMessageFrom(msg tg.MessageClass, ent tg.Entities) (NewMessage, bool) {
 		Spans:  spansFrom(m.Message, m.Entities),
 		Media:  mediaFrom(m),
 		Author: sanitize(liveAuthor(m, ent)),
+		Fwd:    forwardFrom(m, peer.EntitiesFromUpdate(ent)),
 	}
 	return NewMessage{PeerKey: key, Message: hm}, true
 }

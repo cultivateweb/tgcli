@@ -136,6 +136,12 @@ func (m *msgList) layout(w, h int) {
 	for i := range u.history {
 		m.rowStart = append(m.rowStart, len(m.rows))
 		m.rows = append(m.rows, mrow{msg: i, glyphs: m.headerGlyphs(i, w)})
+		// Пересланное сообщение — отдельная строка-метка «↪ из …» под шапкой:
+		// в Saved Messages это отличает ссылки на другие чаты от своих заметок.
+		if fw := u.history[i].Fwd; fw != nil {
+			row := append(glyphsOf(indent, tcell.StyleDefault), forwardGlyphs(fw)...)
+			m.rows = append(m.rows, mrow{msg: i, glyphs: row})
+		}
 		body := wrapGlyphs(u.bodyGlyphs(i), w-indW)
 		if len(body) > maxLines {
 			body = body[:maxLines-1]
@@ -182,6 +188,32 @@ func (m *msgList) headerGlyphs(i, w int) []mglyph {
 	g = append(g, glyphsOf(strings.Repeat(" ", gap), tcell.StyleDefault)...)
 	g = append(g, right...)
 	return g
+}
+
+// forwardGlyphs строит строку-метку пересланного сообщения: значок типа
+// источника, его имя и (если есть куда переходить) подсказку клавиши «g».
+func forwardGlyphs(fw *telegram.Forward) []mglyph {
+	st := tcell.StyleDefault.Foreground(tcell.GetColor(theme.MsgLink)).Italic(true)
+	label := "↪ " + forwardIcon(fw.Kind) + fw.Origin
+	if fw.From.Type != "" {
+		label += "  · g — к источнику"
+	}
+	return glyphsOf(label, st)
+}
+
+// forwardIcon — значок типа чата-источника пересланного сообщения.
+func forwardIcon(kind string) string {
+	switch kind {
+	case "channel":
+		return "📢 "
+	case "group", "supergroup":
+		return "👥 "
+	case "bot":
+		return "🤖 "
+	case "user":
+		return "👤 "
+	}
+	return ""
 }
 
 // statusGlyphs — значок статуса доставки исходящего сообщения: ⧖ отправляется,

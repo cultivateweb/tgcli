@@ -365,6 +365,9 @@ func (u *ui) build() {
 		case 'v':
 			u.enterCopyMode() // выделить и скопировать часть текста сообщения
 			return nil
+		case 'g':
+			u.gotoForwardSource() // перейти в чат-источник пересланного сообщения
+			return nil
 		}
 		return ev
 	})
@@ -1639,6 +1642,48 @@ func (u *ui) elemOpen() {
 		return
 	}
 	u.openAttachment()
+}
+
+// gotoForwardSource открывает чат-источник пересланного сообщения (клавиша g).
+// Если такой чат есть в загруженном списке — открывает его; иначе строит чат из
+// сохранённой ссылки (например, канал, на который мы не подписаны).
+func (u *ui) gotoForwardSource() {
+	if u.msgSel < 0 || u.msgSel >= len(u.history) {
+		return
+	}
+	fw := u.history[u.msgSel].Fwd
+	if fw == nil {
+		u.status.SetText("[" + theme.Warn + "]Это не пересланное сообщение[-]  " + msgHints())
+		return
+	}
+	if fw.From.Type == "" {
+		u.status.SetText("[" + theme.Warn + "]Источник скрыт — переходить некуда[-]  " + msgHints())
+		return
+	}
+	if d := u.dialogByKey(fw.From.Key()); d != nil {
+		u.openSourceChat(*d)
+		return
+	}
+	d := telegram.Dialog{
+		Title:   fw.Origin,
+		Kind:    fw.Kind,
+		CanSend: fw.Kind == "user" || fw.Kind == "bot" || fw.Kind == "group" || fw.Kind == "supergroup",
+		Ref:     fw.From,
+	}
+	d.Peer = fw.From.InputPeer()
+	u.openSourceChat(d)
+}
+
+// openSourceChat открывает чат и переводит фокус в ленту сообщений (как переход
+// из дерева), пряча список чатов.
+func (u *ui) openSourceChat(d telegram.Dialog) {
+	if u.showTree {
+		u.showTree = false
+		u.rebuildMid()
+	}
+	u.openChat(d)
+	u.app.SetFocus(u.messages)
+	u.status.SetText("[" + theme.Success + "]Перешли к источнику: " + tview.Escape(d.Title) + "[-]")
 }
 
 // download — активная загрузка вложения: отмена (для паузы) и прогресс.

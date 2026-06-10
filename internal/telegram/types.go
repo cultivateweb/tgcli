@@ -127,6 +127,21 @@ type HistoryMessage struct {
 	// Status — статус доставки исходящего сообщения. Не сериализуется: read-state
 	// меняется со временем, поэтому вычисляется заново в TUI из ReadOutboxMaxID.
 	Status MsgStatus `json:"-"`
+
+	// Fwd непуст, если сообщение переслано (есть fwd_from). В Saved Messages
+	// именно это отличает «ссылки на другие чаты» (пересланные) от собственных
+	// заметок — у заметок Fwd == nil.
+	Fwd *Forward `json:"fwd,omitempty"`
+}
+
+// Forward — источник пересланного сообщения. Origin — что показать («переслано
+// из …»); From указывает чат-источник для перехода (пустой Type — переходить
+// некуда: отправитель скрыт или его нет в наших данных).
+type Forward struct {
+	Origin string  `json:"origin"`           // имя автора/канала-источника
+	Kind   string  `json:"kind,omitempty"`   // user, bot, group, supergroup, channel
+	From   PeerRef `json:"from,omitempty"`   // чат-источник для навигации
+	MsgID  int64   `json:"msg_id,omitempty"` // ID оригинального сообщения в источнике
 }
 
 // Plain возвращает текст сообщения без разметки для копирования/цитаты:

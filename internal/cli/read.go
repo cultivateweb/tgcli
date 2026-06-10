@@ -45,6 +45,9 @@ func readCmd() *Command {
 				if text == "" {
 					text = "[вложение]"
 				}
+				if m.Fwd != nil { // пересланное — помечаем источник
+					text = "↪ из " + m.Fwd.Origin + ": " + text
+				}
 				fmt.Printf("%s  %-20s  %s\n", formatTime(m.Date), m.Author, text)
 			}
 			return nil
